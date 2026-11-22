@@ -77,7 +77,7 @@ My philosophy is simple: If I disappear tomorrow, my users should still have acc
 <p align="center">
     <img src="doc/demo/logo.png" width="80px" />
     <h1 align="center">Cloud Mail</h1>
-    <p align="center"><strong>基于 Cloudflare 的一站式邮箱服务平台</strong></p>
+    <p align="center">An all-in-one email service platform powered by Cloudflare</p>
     <p align="center">
         <a href="https://www.cloudflare.com/" target="_blank">
             <img src="https://img.shields.io/badge/Cloudflare-F38020?labelColor=F38020&amp;color=F38020&amp;logo=cloudflare&amp;logoColor=white" alt="Cloudflare" />
@@ -87,11 +87,11 @@ My philosophy is simple: If I disappear tomorrow, my users should still have acc
         </a>
         <a href="https://github.com/maillab/cloud-mail/tree/main?tab=MIT-1-ov-file" target="_blank" >
             <img src="https://img.shields.io/badge/license-MIT-green" />
-        </a>  
+        </a>
     </p>
-    <p align="center" >
-        <a href="https://skymail.ink">在线演示</a> · <a href="https://docs.skymail.ink">部署文档</a> ·
-        <a align="center"><a href="README-en.md">English</a> | 简体中文 | <a href="README-ja.md">日本語</a></a>
+    <p align="center">
+        <a href="https://skymail.ink">Live Demo</a> · <a href="https://docs.skymail.ink/en/">Deployment Guide</a> ·
+        <a href="https://github.com/maillab/cloud-mail/blob/main/README.md">简体中文</a> | English | <a href="/README-ja.md">日本語</a>
     </p>
     <p align="center">
         <a href="https://trendshift.io/repositories/20459" target="_blank" >
@@ -103,19 +103,15 @@ My philosophy is simple: If I disappear tomorrow, my users should still have acc
     </p>
 </p>
 
+## Description
+With only one domain, you can create multiple different email addresses, similar to major email platforms. This project can be deployed on Cloudflare Workers to reduce server costs and build your own email service.
+## Project Showcase
 
-## 项目简介
+| ![](/doc/demo/en/demo.jpg)  | ![](/doc/demo/en/demo1.jpg) |
+|-----------------------------|-----------------------------|
+| ![](/doc/demo/en/demo2.jpg) | ![](/doc/demo/en/demo3.jpg) |
 
-只需要一个域名，就可以创建多个不同的邮箱，类似各大邮箱平台，本项目支持部署到 Cloudflare Workers ，降低服务器成本，搭建自己的邮箱服务
-
-## 项目展示
-
-| ![](/doc/demo/demo.jpg)  | ![](/doc/demo/demo1.jpg) |
-|--------------------------|--------------------------|
-| ![](/doc/demo/demo2.jpg) | ![](/doc/demo/demo3.jpg) |
-
-
-## 推荐项目
+## Recommended Project
 
 <table>
   <tr>
@@ -128,112 +124,107 @@ My philosophy is simple: If I disappear tomorrow, my users should still have acc
       <a href="https://github.com/pixtalelab/pixtale">Pixtale</a>
     </td>
     <td valign="middle">
-      一个自托管云存储相册应用
+      A self-hosted cloud storage photo album app
     </td>
   </tr>
 </table>
 
-## 功能介绍
+## Features
 
-- **💰 低成本使用**： 可部署到 Cloudflare Workers 降低服务器成本
+- **💰 Low-Cost Usage**: No server required — deploy to Cloudflare Workers to reduce costs.
 
-- **💻 响应式设计**：响应式布局自动适配PC和大部分手机端浏览器
+- **💻 Responsive Design**: Automatically adapts to both desktop and most mobile browsers.
 
-- **📧 邮件发送**：集成 Cloudflare Email 和 Resend 发送邮件，支持群发
+- **📧 Email Sending**: Integrated with Cloudflare Email and Resend for sending email.
 
-- **🛡️ 管理员功能**：可以对用户，邮件进行管理，RABC权限控制对功能及使用资源限制
+- **🛡️ Admin Features**: Admin controls for user and email management with RBAC-based access control.
 
-- **📦 附件收发**：支持收发附件，使用R2对象存储保存和下载文件
+- **📦 Attachment Support**: Send and receive attachments, stored and downloaded via R2 object storage.
 
-- **🔔 邮件推送**：接收邮件后可以转发到TG机器人或其他服务商邮箱
+- **🔔 Email Push**: Forward received emails to Telegram bots or other email providers.
 
-- **📡 开放API**：支持使用API批量生成用户，多条件查询邮件 
+- **📡 Open API**: Supports batch user creation via API and multi-condition email queries
 
-- **🔢 验证码识别**：使用Workers AI，自动识别邮件验证码 
+- **🔢 Verification Code Recognition**: Auto-detect codes via Workers AI
 
-- **📈 数据可视化**：使用ECharts对系统数据详情，用户邮件增长可视化显示
+- **📈 Data Visualization**: Use ECharts to visualize system data, including user email growth.
 
-- **🎨 个性化设置**：可以自定义网站标题，登录背景，透明度
+- **🎨 Personalization**: Customize website title, login background, and transparency.
 
-- **🤖 人机验证**：集成Turnstile人机验证，防止人机批量注册
+- **🤖 CAPTCHA**: Integrated with Turnstile CAPTCHA to prevent automated registration.
 
-- **📜 更多功能**：正在开发中...
+- **📜 More Features**: Under development...
 
+## Tech Stack
 
+- **Platform**: [Cloudflare Workers](https://developers.cloudflare.com/workers/)
 
-## 技术栈
+- **Web Framework**: [Hono](https://hono.dev/)
 
-- **平台**：[Cloudflare Workers](https://developers.cloudflare.com/workers/)
+- **ORM**: [Drizzle](https://orm.drizzle.team/)
 
-- **Web框架**：[Hono](https://hono.dev/)
+- **Frontend Framework**: [Vue3](https://vuejs.org/)
 
-- **ORM：**[Drizzle](https://orm.drizzle.team/)
+- **UI Framework**: [Element Plus](https://element-plus.org/)
 
-- **前端框架**：[Vue3](https://vuejs.org/) 
+- **Email Sending**: [Cloudflare Email](https://developers.cloudflare.com/email-service/) / [Resend](https://resend.com/)
 
-- **UI框架**：[Element Plus](https://element-plus.org/) 
+- **Cache**: [Cloudflare KV](https://developers.cloudflare.com/kv/)
 
-- **邮件发送：** [Cloudflare Email](https://developers.cloudflare.com/email-service/) / [Resend](https://resend.com/)
+- **Database**: [Cloudflare D1](https://developers.cloudflare.com/d1/)
 
-- **缓存**：[Cloudflare KV](https://developers.cloudflare.com/kv/)
+- **File Storage**: [Cloudflare R2](https://developers.cloudflare.com/r2/)
 
-- **数据库**：[Cloudflare D1](https://developers.cloudflare.com/d1/)
-
-- **文件存储**：[Cloudflare R2](https://developers.cloudflare.com/r2/)
-
-## 目录结构
+## Project Structure
 
 ```
 cloud-mail
-├── mail-worker                    # worker后端项目
+├── mail-worker                    # Backend worker project
 │   ├── src
-│   │   ├── api                    # api接口层
-│   │   ├── const                  # 项目常量
-│   │   ├── dao                    # 数据访问层
-│   │   ├── email                  # 邮件处理接收
-│   │   ├── entity                 # 数据库实体
-│   │   ├── error                  # 自定义异常
-│   │   ├── hono                   # web框架配置、拦截器、全局异常等
-│   │   ├── i18n                   # 语言国际化
-│   │   ├── init                   # 数据库缓存初始化
-│   │   ├── model                  # 响应体数据封装
-│   │   ├── security               # 身份权限认证
-│   │   ├── service                # 业务服务层
-│   │   ├── template               # 消息模板
-│   │   ├── utils                  # 工具类
-│   │   └── index.js               # 入口文件
-│   ├── pageckge.json              # 项目依赖
-│   └── wrangler.toml              # 项目配置
+│   │   ├── api                    # API layer
+│   │   ├── const                  # Project constants
+│   │   ├── dao                    # Data access layer
+│   │   ├── email                  # Email processing and handling
+│   │   ├── entity                 # Database entities
+│   │   ├── error                  # Custom exceptions
+│   │   ├── hono                   # Web framework, middleware, error handling
+│   │   ├── i18n                   # Internationalization
+│   │   ├── init                   # Database and cache initialization
+│   │   ├── model                  # Response data models
+│   │   ├── security               # Authentication and authorization
+│   │   ├── service                # Business logic layer
+│   │   ├── template               # Message templates
+│   │   ├── utils                  # Utility functions
+│   │   └── index.js               # Entry point
+│   ├── package.json               # Project dependencies
+│   └── wrangler.toml              # Project configuration
 │
-├── mail-vue                       # vue前端项目
+├── mail-vue                       # Frontend Vue project
 │   ├── src
-│   │   ├── axios                  # axios配置
-│   │   ├── components             # 自定义组件
-│   │   ├── echarts                # echarts组件导入
-│   │   ├── i18n                   # 语言国际化
-│   │   ├── init                   # 入站初始化
-│   │   ├── layout                 # 主体布局组件
-│   │   ├── perm                   # 权限认证
-│   │   ├── request                # api接口
-│   │   ├── router                 # 路由配置
-│   │   ├── store                  # 全局状态管理
-│   │   ├── utils                  # 工具类
-│   │   ├── views                  # 页面组件
-│   │   ├── app.vue                # 入口组件
-│   │   ├── main.js                # 入口js
-│   │   └── style.css              # 全局css
-│   ├── package.json               # 项目依赖
-└── └── env.release                # 项目配置
+│   │   ├── axios                  # Axios configuration
+│   │   ├── components             # Custom components
+│   │   ├── echarts                # ECharts integration
+│   │   ├── i18n                   # Internationalization
+│   │   ├── init                   # Startup initialization
+│   │   ├── layout                 # Main layout components
+│   │   ├── perm                   # Permissions and access control
+│   │   ├── request                # API request layer
+│   │   ├── router                 # Router configuration
+│   │   ├── store                  # Global state management
+│   │   ├── utils                  # Utility functions
+│   │   ├── views                  # Page components
+│   │   ├── app.vue                # Root component
+│   │   ├── main.js                # Entry JS file
+│   │   └── style.css              # Global styles
+│   ├── package.json               # Project dependencies
+└── └── env.release                # Environment configuration
+
 ```
 
-## 许可证
+## License
 
-本项目采用 [MIT](LICENSE) 许可证	
+This project is licensed under the [MIT](LICENSE) license.
 
-
-## 交流
+## Communication
 
 [Telegram](https://t.me/cloud_mail_tg)
-
-
-
