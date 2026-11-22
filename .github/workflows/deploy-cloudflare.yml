@@ -1,264 +1,132 @@
-name: 🚀 Deploy cloud-mail to Cloudflare Workers
+name: 🔁 Deploy cloud-mail sync worker to Cloudflare Workers
+
+# Deploys sync-worker/ only. The main mail deploy workflow
+# (deploy-cloudflare.yml) covers mail-worker/ and mail-vue/ and never
+# touches this worker.
+#
+# Manual run: Actions -> "Deploy cloud-mail sync worker" -> Run workflow.
+#
+# Required repo secrets (Settings -> Secrets and variables -> Actions):
+#   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (same ones the main
+#   deploy uses), CLOUDMAIL_ADMIN_EMAIL, CLOUDMAIL_ADMIN_PASSWORD,
+#   SYNC_TOKEN.
+# Required repo variables (same page, Variables tab) — secrets work too:
+#   CLOUDMAIL_URL, HOME_HEALTH_URL, HOME_INJECT_URL, USER_MAP.
+# Optional: SYNC_KV_ID (id of an existing SYNC_KV namespace; if unset the
+# workflow finds or creates one titled SYNC_KV).
 
 on:
-  push:
-    branches: [ main ]
-    paths:
-      - "mail-worker/**"
-      - "mail-vue/**"
   workflow_dispatch:
 
 jobs:
-  Deploy-cloud-mail:
-    name: 🏗️ Build and Deploy
+  Deploy-sync-worker:
+    name: 🏗️ Deploy sync worker
     runs-on: ubuntu-latest
 
     env:
-      NAME: ${{ secrets.NAME || vars.NAME || 'cloud-mail' }}
-      CUSTOM_DOMAIN: ${{ secrets.CUSTOM_DOMAIN || vars.CUSTOM_DOMAIN }}
-      DOMAIN: ${{ secrets.DOMAIN || vars.DOMAIN }}
-      ADMIN: ${{ secrets.ADMIN || vars.ADMIN }}
-      PASSWORD: ${{ secrets.PASSWORD || vars.PASSWORD }}
-      JWT_SECRET: ${{ secrets.JWT_SECRET || vars.JWT_SECRET }}
-      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN || vars.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID || vars.CLOUDFLARE_ACCOUNT_ID }}
-      D1_DATABASE_ID: ${{ secrets.D1_DATABASE_ID || vars.D1_DATABASE_ID }}
-      KV_NAMESPACE_ID: ${{ secrets.KV_NAMESPACE_ID || vars.KV_NAMESPACE_ID }}
-      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME || vars.R2_BUCKET_NAME }}
-      PROJECT_LINK: ${{ secrets.PROJECT_LINK || vars.PROJECT_LINK }}
-      AI_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast' }}
-      EMAIL: ${{ secrets.EMAIL || vars.EMAIL }}
-      ANALYSIS_CACHE: ${{ secrets.ANALYSIS_CACHE || vars.ANALYSIS_CACHE || false }}
-
-
-    outputs:
-      worker_url: ${{ steps.deploy.outputs.worker_url }}
-
+      SYNC_KV_ID: ${{ secrets.SYNC_KV_ID || vars.SYNC_KV_ID }}
+      CLOUDMAIL_URL: ${{ secrets.CLOUDMAIL_URL || vars.CLOUDMAIL_URL }}
+      HOME_HEALTH_URL: ${{ secrets.HOME_HEALTH_URL || vars.HOME_HEALTH_URL }}
+      HOME_INJECT_URL: ${{ secrets.HOME_INJECT_URL || vars.HOME_INJECT_URL }}
+      USER_MAP: ${{ secrets.USER_MAP || vars.USER_MAP }}
+      CLOUDMAIL_ADMIN_EMAIL: ${{ secrets.CLOUDMAIL_ADMIN_EMAIL }}
+      CLOUDMAIL_ADMIN_PASSWORD: ${{ secrets.CLOUDMAIL_ADMIN_PASSWORD }}
+      SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
 
     steps:
       - name: 🚚 Checkout repository
         uses: actions/checkout@v4
 
-      - name: ⚙ Set up pnpm
-        uses: pnpm/action-setup@v4.1.0
-        with:
-          version: 11
-
       - name: ⚙ Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "24"
-          cache: "pnpm"
-          cache-dependency-path: "./mail-worker/pnpm-lock.yaml"
+          node-version: "22"
 
       - name: 📦 Install dependencies
-        run: pnpm install --frozen-lockfile
-        working-directory: ./mail-worker
+        working-directory: ./sync-worker
+        run: npm install
 
       - name: 📡 Disable wrangler telemetry
-        working-directory: ./mail-worker
-        run: pnpm wrangler telemetry disable
+        working-directory: ./sync-worker
+        run: npx wrangler telemetry disable
 
-      - name: 🛠️ Set up environment
-        working-directory: ./mail-worker
+      - name: 🔍 Check required settings
+        working-directory: ./sync-worker
         run: |
-          
-          echo "🔐 Starting environment setup..."
-          
-          if [ -z "$JWT_SECRET" ] || grep -q '[?%#/\\]' <<< "$JWT_SECRET"; then
-            echo "❌ JWT_SECRET variable is empty or contains invalid characters (?, %, #, /, \\)."
-            exit 1
-          fi
-          
-          if ! jq -e 'type == "array"' <<< "$DOMAIN" ; then
-            echo "❌ DOMAIN variable must be a JSON array (e.g., [\"example.com\"])."
-            exit 1
-          fi
-          
-          if [ -z "$ADMIN" ]; then
-            echo "❌ ADMIN variable cannot be empty."
-            exit 1
-          fi
-          
-          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
-            echo "❌ CLOUDFLARE_ACCOUNT_ID variable cannot be empty."
-            exit 1
-          fi
-          
-          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
-            echo "❌ CLOUDFLARE_API_TOKEN variable cannot be empty."
-            exit 1
-          fi
-          
-          if [ -z "$CUSTOM_DOMAIN" ]; then
-            echo "::warning:: CUSTOM_DOMAIN variable is not set."
-          fi
-          
-          CONFIG_FILE="wrangler-action.toml"
-          
-          if [ -z "$R2_BUCKET_NAME" ]; then
-            sed -i '/\[\[r2_buckets\]\]/,/^$/d' "$CONFIG_FILE"
-          fi
-          
-          if [ -z "$PROJECT_LINK" ]; then
-            sed -i '/^project_link = /d' "$CONFIG_FILE"
-          fi
-          
-          if [ -z "$CUSTOM_DOMAIN" ]; then
-            sed -i '/\[\[routes\]\]/,/^$/d' "$CONFIG_FILE"
-          fi
-          
-          if [ -n "$EMAIL" ]; then
-            cat >> "$CONFIG_FILE" <<'EOF'
+          fail=0
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDMAIL_URL HOME_HEALTH_URL HOME_INJECT_URL USER_MAP CLOUDMAIL_ADMIN_EMAIL CLOUDMAIL_ADMIN_PASSWORD SYNC_TOKEN; do
+            if [ -z "${!v}" ]; then echo "❌ $v is not set (add it as a repo secret or variable)."; fail=1; fi
+          done
+          if ! jq -e . >/dev/null 2>&1 <<< "$USER_MAP"; then echo "❌ USER_MAP is not valid JSON (e.g. {\"1\": \"support@bearermail.com\", \"2\": \"jett@bearermail.com\"})."; fail=1; fi
+          if [ "$fail" = 1 ]; then exit 1; fi
+          echo "✅ All required settings are present."
 
-          [[send_email]]
-          name = "email"
-          EOF
-          fi
-
-          sed -i "s|\${NAME}|${NAME}|g" "$CONFIG_FILE"
-          sed -i "s|\${CUSTOM_DOMAIN}|${CUSTOM_DOMAIN}|g" "$CONFIG_FILE"
-          sed -i "s|\"\${DOMAIN}\"|${DOMAIN}|g" "$CONFIG_FILE"
-          sed -i "s|\${ADMIN}|${ADMIN}|g" "$CONFIG_FILE"
-          sed -i "s|\${PASSWORD}|${PASSWORD}|g" "$CONFIG_FILE"
-          sed -i "s|\${JWT_SECRET}|${JWT_SECRET}|g" "$CONFIG_FILE"
-          sed -i "s|\${R2_BUCKET_NAME}|${R2_BUCKET_NAME}|g" "$CONFIG_FILE"
-          sed -i "s|\${PROJECT_LINK}|${PROJECT_LINK}|g" "$CONFIG_FILE"
-          sed -i "s|\${ANALYSIS_CACHE}|${ANALYSIS_CACHE}|g" "$CONFIG_FILE"
-          sed -i "s|\${AI_MODEL}|${AI_MODEL}|g" "$CONFIG_FILE"
-          sed -i "s|\${LINUXDO_CLIENT_ID}|${LINUXDO_CLIENT_ID}|g" "$CONFIG_FILE"
-          sed -i "s|\${LINUXDO_CLIENT_SECRET}|${LINUXDO_CLIENT_SECRET}|g" "$CONFIG_FILE"
-          sed -i "s|\${LINUXDO_CALLBACK_URL}|${LINUXDO_CALLBACK_URL}|g" "$CONFIG_FILE"
-          
-          echo "✅ Environment setup completed."
-
-      - name: ⚡ Set up KV database
-        working-directory: ./mail-worker
+      - name: 🗄️ Set up SYNC_KV namespace
+        working-directory: ./sync-worker
         run: |
-          
-          CONFIG_FILE="wrangler-action.toml"
-          
-          if [ -n "$KV_NAMESPACE_ID" ]; then
-            sed -i "s|\${KV_NAMESPACE_ID}|${KV_NAMESPACE_ID}|g" "$CONFIG_FILE"
-            echo "✅ Using the database from environment variables."
+          if [ -n "$SYNC_KV_ID" ]; then
+            echo "✅ Using the SYNC_KV namespace from SYNC_KV_ID."
             exit 0
           fi
-          
-          echo "🔍 Checking if the database exists..."
-          
+
+          echo "🔍 Checking if the SYNC_KV namespace exists..."
+
           set +e
-            KV_LIST=$(pnpm wrangler kv namespace list 2>&1)
+            KV_LIST=$(npx wrangler kv namespace list 2>&1)
             STATUS=$?
           set -e
-          
+
           if [ $STATUS -ne 0 ]; then
             echo "$KV_LIST"
             exit 1
           fi
-                  
-          if echo "$KV_LIST" | jq -e ".[] | select(.title == \"$NAME\")" >/dev/null; then
-            echo "✅ Database $NAME already exists."
-            KV_ID=$(echo "$KV_LIST" | jq -r ".[] | select(.title == \"$NAME\") | .id")
-            echo "KV_NAMESPACE_ID: $KV_ID"
+
+          if echo "$KV_LIST" | jq -e '.[] | select(.title == "SYNC_KV")' >/dev/null; then
+            echo "✅ Namespace SYNC_KV already exists."
+            KV_ID=$(echo "$KV_LIST" | jq -r '.[] | select(.title == "SYNC_KV") | .id')
           else
-            echo "⚠️ Database $NAME does not exist. Starting creation..."
-            pnpm wrangler kv namespace create $NAME
-            KV_LIST=$(pnpm wrangler kv namespace list)
-            KV_ID=$(echo "$KV_LIST" | jq -r ".[] | select(.title == \"$NAME\") | .id")
+            echo "⚠️ Namespace SYNC_KV does not exist. Starting creation..."
+            npx wrangler kv namespace create SYNC_KV
+            KV_LIST=$(npx wrangler kv namespace list)
+            KV_ID=$(echo "$KV_LIST" | jq -r '.[] | select(.title == "SYNC_KV") | .id')
           fi
-          
-          sed -i "s|\${KV_NAMESPACE_ID}|$KV_ID|g" "$CONFIG_FILE"
-          echo "✅ Setup completed."
 
-      - name: 🐬 Set up D1 database
-        working-directory: ./mail-worker
+          echo "SYNC_KV_ID=$KV_ID" >> $GITHUB_ENV
+          echo "✅ Namespace setup completed."
+
+      - name: 🛠️ Build deploy config
+        working-directory: ./sync-worker
         run: |
-          
-          CONFIG_FILE="wrangler-action.toml"
-          
-          if [ -n "$D1_DATABASE_ID" ]; then
-            sed -i "s|\${D1_DATABASE_ID}|${D1_DATABASE_ID}|g" "$CONFIG_FILE"
-            echo "✅ Using the database from environment variables."
-            exit 0
-          fi
-          
-          echo "🔍 Checking if the database exists..."
-          
-          set +e
-            DB_LIST=$(pnpm wrangler d1 list --json 2>&1)
-            STATUS=$?
-          set -e
-          
-          if [ $STATUS -ne 0 ]; then
-            echo "$DB_LIST"
+          # wrangler.toml is the template: the KV id and the [vars] are
+          # empty there and get filled in here from repo secrets/variables,
+          # so no id or URL is ever committed.
+          cp wrangler.toml wrangler-deploy.toml
+          python3 - <<'EOF'
+          import json, os, re
+          p = 'wrangler-deploy.toml'
+          t = open(p).read()
+          t = re.sub(r'(?m)^(id = )""', r'\g<1>"' + os.environ['SYNC_KV_ID'] + '"', t, count=1)
+          for k in ['CLOUDMAIL_URL', 'HOME_HEALTH_URL', 'HOME_INJECT_URL', 'USER_MAP']:
+              t = re.sub(r'(?m)^' + k + r' = ""', k + ' = ' + json.dumps(os.environ[k]), t, count=1)
+          open(p, 'w').write(t)
+          EOF
+          # Fail loudly if any value stayed empty instead of deploying blind.
+          if grep -Eq '^(id|CLOUDMAIL_URL|HOME_HEALTH_URL|HOME_INJECT_URL|USER_MAP) = ""' wrangler-deploy.toml; then
+            echo "❌ A value in wrangler-deploy.toml is still empty."
             exit 1
           fi
-          
-          if echo "$DB_LIST" | jq -e ".[] | select(.name == \"$NAME\")" >/dev/null; then
-            echo "✅ Database $NAME already exists."
-            D1_ID=$(echo "$DB_LIST" | jq -r ".[] | select(.name == \"$NAME\") | .uuid")
-            echo "D1_DATABASE_ID: $D1_ID"
-          else
-            echo "⚠️ Database $NAME does not exist. Starting creation..."
-            pnpm wrangler d1 create $NAME
-            DB_LIST=$(pnpm wrangler d1 list --json)
-            D1_ID=$(echo "$DB_LIST" | jq -r ".[] | select(.name == \"$NAME\") | .uuid")
-          fi
-          
-          sed -i "s|\${D1_DATABASE_ID}|$D1_ID|g" "$CONFIG_FILE"
-          echo "✅ Setup completed."
+          echo "✅ Deploy config ready."
 
-      - name: 🚀 Start deployment
-        id: deploy
-        working-directory: ./mail-worker
+      - name: 🚀 Deploy
+        working-directory: ./sync-worker
+        run: npx wrangler deploy -c wrangler-deploy.toml
+
+      - name: 🔐 Set worker secrets
+        working-directory: ./sync-worker
         run: |
-          echo "🚀 Starting deployment..."
-          pnpm wrangler deploy -c wrangler-action.toml 2>&1 \
-            | tee deploy.log \
-            | grep -v "https://.*\.workers\.dev" \
-            | sed -E 's/env\.domain .*/env.domain (***)/' \
-            || true
-          
-          DEPLOY_EXIT_CODE=${PIPESTATUS[0]}
-          if [ $DEPLOY_EXIT_CODE -ne 0 ]; then
-            exit 1
-          fi
-          
-          WORKER_URL=$(grep -o "https://.*\.workers\.dev" deploy.log || echo "")
-          
-          if [ -n "$WORKER_URL" ]; then
-            echo "::add-mask::$WORKER_URL"
-          fi
-          
-          echo "worker_url=$WORKER_URL" >> $GITHUB_OUTPUT
-          echo "✅ Setup completed."
-
-      - name: ♻️ Initialize database
-        run: |
-          echo "🛠️ Starting database initialization..."
-          sleep 15
-          
-          WORKER_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
-          WORKER_URL="${WORKER_URL:-${{ steps.deploy.outputs.worker_url }}}"
-          
-          if [ -z "$WORKER_URL" ]; then
-            echo "❌ Preview URL not available. Please set CUSTOM_DOMAIN."
-            exit 1
-          fi
-          
-          HTTP_CODE=$(curl -sL -w "%{http_code}" -o response.txt "$WORKER_URL/api/init/${JWT_SECRET}")
-          RESPONSE_BODY=$(cat response.txt)
-
-          if [ "$RESPONSE_BODY" = "success" ]; then
-            echo "✅ Setup completed."
-          else
-            echo "❌ Failed. HTTP: $HTTP_CODE, Response: $RESPONSE_BODY"
-            exit 1
-          fi
-
-      - name: 🗑️ Delete workflow runs
-        uses: GitRML/delete-workflow-runs@main
-        continue-on-error: true
-        with:
-          retain_days: '1'
-          keep_minimum_runs: '0'
+          printf '%s' "$CLOUDMAIL_ADMIN_EMAIL" | npx wrangler secret put CLOUDMAIL_ADMIN_EMAIL
+          printf '%s' "$CLOUDMAIL_ADMIN_PASSWORD" | npx wrangler secret put CLOUDMAIL_ADMIN_PASSWORD
+          printf '%s' "$SYNC_TOKEN" | npx wrangler secret put SYNC_TOKEN
+          echo "✅ Secrets set. Test with: curl https://cloud-mail-sync.<your-subdomain>.workers.dev/sync"
