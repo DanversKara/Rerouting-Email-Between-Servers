@@ -37,6 +37,8 @@ const zh = {
 	minEmailPrefix: '邮箱名至少{{msg}}位',
 	banEmailPrefix: '邮箱名包含非法字符',
 	pwdMinLength: '密码至少六位',
+	resetTooMany: '密码重置请求过于频繁，请稍后再试',
+	resetLinkInvalid: '重置链接无效或已过期，请重新申请',
 	notEmailDomain: '非法邮箱域名',
 	emptyRegKey: '注册码不能为空',
 	notExistRegKey: '注册码不存在',

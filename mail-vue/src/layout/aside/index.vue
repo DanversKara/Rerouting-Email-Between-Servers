@@ -3,7 +3,10 @@
     <div>
       <div class="title" :class="{ 'title-display': titleUsesDisplayFont }">
         <img class="logo" :src="logoUrl" alt="" />
-        <div>{{settingStore.settings.title}}</div>
+        <div class="brand-text">
+          <div class="brand-wordmark">{{settingStore.settings.title}}</div>
+          <div class="brand-subtitle">BACKUP SERVER</div>
+        </div>
       </div>
       <button v-perm="'email:send'" class="compose-bar" type="button" @click="openCompose">
         <Icon icon="hugeicons:quill-write-01" width="22" height="22" />
@@ -85,7 +88,7 @@ import {useUiStore} from "@/store/ui.js";
 const settingStore = useSettingStore();
 const uiStore = useUiStore();
 const route = useRoute();
-const logoUrl = `${import.meta.env.BASE_URL}mail.png`
+const logoUrl = `${import.meta.env.BASE_URL}bearermail-logo.svg`
 const titleUsesDisplayFont = computed(() => !/\p{Script=Han}/u.test(settingStore.settings.title || ''))
 
 function openCompose() {
@@ -106,7 +109,7 @@ function openCompose() {
 
 .title {
   margin: 10px 6px;
-  height: 45px;
+  min-height: 45px;
   border-radius: 6px;
   display: flex;
   position: relative;
@@ -118,12 +121,31 @@ function openCompose() {
   color: #ffffff;
   transition: all 0.3s ease;
   max-width: 240px;
-  padding: 0 10px;
-  > div {
+  padding: 6px 10px;
+  .brand-text {
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .brand-wordmark {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    max-width: calc(240px - 20px - 32px - 5px);
+    line-height: 1.15;
+  }
+
+  .brand-subtitle {
+    font-family: Inter, "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 2.5px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.65);
+    line-height: 1.3;
+    white-space: nowrap;
   }
 
   .logo {

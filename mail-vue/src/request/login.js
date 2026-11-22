@@ -11,3 +11,11 @@ export function logout() {
 export function register(form) {
     return http.post('/register', form)
 }
+
+export function requestPasswordReset(email) {
+    return http.post('/forget-password', {email})
+}
+
+export function confirmPasswordReset(token, password) {
+    return http.post('/reset-password', {token, password})
+}

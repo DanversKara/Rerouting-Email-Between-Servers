@@ -37,6 +37,8 @@ const en = {
 	minEmailPrefix: 'Email must be at least {{msg}} characters',
 	banEmailPrefix: 'Invalid characters in email address',
 	pwdMinLength: 'Password must be at least 6 characters',
+	resetTooMany: 'Too many password reset requests, please try again later',
+	resetLinkInvalid: 'This reset link is invalid or has expired, please request a new one',
 	notEmailDomain: 'Invalid email domain',
 	emptyRegKey: 'Invite code cannot be empty',
 	notExistRegKey: 'Invite code does not exist',

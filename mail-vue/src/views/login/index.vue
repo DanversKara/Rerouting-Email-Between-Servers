@@ -13,9 +13,15 @@
     <div v-else :style="background"></div>
     <div class="form-wrapper">
       <div class="container">
-        <span class="form-title">{{ settingStore.settings.title }}</span>
+        <div class="brand">
+          <img class="brand-logo" :src="logoUrl" alt="" />
+          <div class="brand-wordmark">{{ settingStore.settings.title }}</div>
+          <div class="brand-subtitle">BACKUP SERVER</div>
+        </div>
         <span class="form-desc" v-if="show === 'login'">{{ $t('loginTitle') }}</span>
-        <span class="form-desc" v-else>{{ $t('regTitle') }}</span>
+        <span class="form-desc" v-else-if="show === 'register'">{{ $t('regTitle') }}</span>
+        <span class="form-desc" v-else-if="show === 'forgot'">{{ $t('forgotDesc') }}</span>
+        <span class="form-desc" v-else>{{ $t('resetDesc') }}</span>
         <div v-show="show === 'login'">
           <el-input :class="!hideLoginDomain ? 'email-input' : ''" v-model="form.email"
                     type="text" :placeholder="$t('emailAccount')" autocomplete="off" @keyup.enter="submit">
@@ -58,8 +64,12 @@
             <Icon v-else :icon="p.icon" width="18" height="18" style="margin-right: 10px" />
             {{ p.label }}
           </el-button>
+          <div class="login-links">
+            <span class="forgot-link" @click="show = 'forgot'">{{ $t('forgotPassword') }}</span>
+            <a class="return-link" href="https://mail.bearermail.com" target="_blank" rel="noopener">Return to Bearermail</a>
+          </div>
         </div>
-        <div v-show="show !== 'login'">
+        <div v-show="show === 'register'">
           <el-input :class="!hideLoginDomain ? 'email-input' : ''" v-model="registerForm.email" type="text" :placeholder="$t('emailAccount')"
                     autocomplete="off" @keyup.enter="submitRegister">
             <template #append v-if="!hideLoginDomain">
@@ -106,6 +116,47 @@
             <Icon v-else :icon="p.icon" width="18" height="18" style="margin-right: 10px" />
             {{ p.label }}
           </el-button>
+        </div>
+        <div v-show="show === 'forgot'">
+          <el-input :class="!hideLoginDomain ? 'email-input' : ''" v-model="forgotForm.email" type="text" :placeholder="$t('emailAccount')"
+                    autocomplete="off" @keyup.enter="submitForgot">
+            <template #append v-if="!hideLoginDomain">
+              <div @click.stop="openSelect">
+                <el-select
+                    v-if="show === 'forgot'"
+                    ref="mySelect"
+                    v-model="suffix"
+                    :placeholder="$t('select')"
+                    class="select"
+                >
+                  <el-option
+                      v-for="item in domainList"
+                      :key="item"
+                      :label="item"
+                      :value="item"
+                  />
+                </el-select>
+                <div>
+                  <span>{{ suffix }}</span>
+                  <Icon class="setting-icon" icon="mingcute:down-small-fill" width="20" height="20"/>
+                </div>
+              </div>
+            </template>
+          </el-input>
+          <el-button class="btn" type="primary" @click="submitForgot" :loading="forgotLoading"
+          >{{ $t('forgotBtn') }}
+          </el-button>
+          <div v-if="forgotSent" class="forgot-note">{{ $t('forgotSentMsg') }}</div>
+          <div class="switch" @click="show = 'login'">{{ $t('backToLogin') }}</div>
+        </div>
+        <div v-show="show === 'reset'">
+          <el-input v-model="resetForm.password" :placeholder="$t('newPassword')" type="password" autocomplete="off" @keyup.enter="submitReset"/>
+          <el-input v-model="resetForm.confirmPassword" :placeholder="$t('confirmPwd')" type="password"
+                    autocomplete="off" @keyup.enter="submitReset"/>
+          <el-button class="btn" type="primary" @click="submitReset" :loading="resetLoading"
+          >{{ $t('resetBtn') }}
+          </el-button>
+          <div class="switch" @click="show = 'login'">{{ $t('backToLogin') }}</div>
         </div>
         <template v-if="settingStore.settings.register === 0">
           <div class="switch" @click="show = 'register'" v-if="show === 'login'">{{ $t('noAccount') }}
@@ -161,6 +212,7 @@ import {useRoute} from "vue-router";
 import {computed, nextTick, onBeforeUnmount, reactive, ref, watch} from "vue";
 import {login} from "@/request/login.js";
 import {register} from "@/request/login.js";
+import {requestPasswordReset, confirmPasswordReset} from "@/request/login.js";
 import {websiteConfig} from "@/request/setting.js";
 import {isEmail} from "@/utils/verify-utils.js";
 import {useSettingStore} from "@/store/setting.js";
@@ -187,6 +239,18 @@ const bindLoading = ref(false)
 const oauthLoading = ref(false);
 const showBindForm = ref(false);
 const show = ref('login')
+const logoUrl = `${import.meta.env.BASE_URL}bearermail-logo.svg`
+const forgotForm = reactive({
+  email: ''
+})
+const forgotLoading = ref(false)
+const forgotSent = ref(false)
+const resetForm = reactive({
+  password: '',
+  confirmPassword: ''
+})
+const resetLoading = ref(false)
+const resetToken = ref('')
 
 const oauthKeys = ['linuxdo', 'github', 'google']
 
@@ -359,6 +423,17 @@ const loginFns = {
 }
 
 oauthGetUser();
+
+// Password reset links land here: /login/reset-password?token=...
+if (route.path === '/login/reset-password') {
+  const token = route.query.token
+  if (token) {
+    show.value = 'reset'
+    resetToken.value = token
+  } else {
+    show.value = 'forgot'
+  }
+}
 
 async function oauthGetUser() {
 
@@ -640,6 +715,86 @@ function submitRegister() {
   });
 }
 
+function submitForgot() {
+
+  if (forgotLoading.value) return
+
+  if (!forgotForm.email) {
+    ElMessage({
+      message: t('emptyEmailMsg'),
+      type: 'error',
+      plain: true,
+    })
+    return
+  }
+
+  const email = getFullEmail(forgotForm.email);
+
+  if (!isEmail(email)) {
+    ElMessage({
+      message: t('notEmailMsg'),
+      type: 'error',
+      plain: true,
+    })
+    return
+  }
+
+  forgotLoading.value = true
+  requestPasswordReset(email).then(() => {
+    forgotSent.value = true
+    forgotLoading.value = false
+  }).catch(() => {
+    forgotLoading.value = false
+  })
+}
+
+function submitReset() {
+
+  if (resetLoading.value) return
+
+  if (!resetForm.password) {
+    ElMessage({
+      message: t('emptyPwdMsg'),
+      type: 'error',
+      plain: true,
+    })
+    return
+  }
+
+  if (resetForm.password.length < 6) {
+    ElMessage({
+      message: t('pwdLengthMsg'),
+      type: 'error',
+      plain: true,
+    })
+    return
+  }
+
+  if (resetForm.password !== resetForm.confirmPassword) {
+    ElMessage({
+      message: t('confirmPwdFailMsg'),
+      type: 'error',
+      plain: true,
+    })
+    return
+  }
+
+  resetLoading.value = true
+  confirmPasswordReset(resetToken.value, resetForm.password).then(() => {
+    resetLoading.value = false
+    resetForm.password = ''
+    resetForm.confirmPassword = ''
+    show.value = 'login'
+    ElMessage({
+      message: t('resetSuccessMsg'),
+      type: 'success',
+      plain: true,
+    })
+  }).catch(() => {
+    resetLoading.value = false
+  })
+}
+
 </script>
 
 
@@ -656,6 +811,14 @@ function submitRegister() {
 </style>
 
 <style lang="scss" scoped>
+
+@font-face {
+  font-family: "BAHAMASB";
+  src: url("/fonts/BAHAMASB.woff") format("woff");
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
 
 .form-wrapper {
   position: fixed;
@@ -708,9 +871,60 @@ function submitRegister() {
     color: var(--form-desc-color);
   }
 
-  .form-title {
-    font-weight: bold;
-    font-size: 22px !important;
+  .brand {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin-bottom: 6px;
+  }
+
+  .brand-logo {
+    width: 56px;
+    height: 56px;
+    object-fit: contain;
+    margin-bottom: 10px;
+  }
+
+  .brand-wordmark {
+    font-family: "BAHAMASB", Inter, "Helvetica Neue", Helvetica, sans-serif;
+    font-size: 30px;
+    line-height: 1.1;
+    color: var(--el-text-color-primary);
+  }
+
+  .brand-subtitle {
+    margin-top: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--form-desc-color);
+  }
+
+  .login-links {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 16px;
+    font-size: 13px;
+  }
+
+  .forgot-link {
+    color: var(--login-switch-color);
+    cursor: pointer;
+  }
+
+  .return-link {
+    color: var(--form-desc-color);
+    text-decoration: none;
+    cursor: pointer;
+  }
+
+  .forgot-note {
+    margin-top: 14px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--form-desc-color);
   }
 
   .switch {
