@@ -9,6 +9,7 @@
         <Icon icon="hugeicons:quill-write-01" width="22" height="22" />
         <span>{{ $t('compose') }}</span>
       </button>
+      <a class="back-to-bearermail" href="https://mail.bearermail.com" target="_blank" rel="noopener">BACK TO BEARERMAIL</a>
       <el-menu :collapse="false" text-color="#fff" active-text-color="#fff" style="margin-top: 6px">
         <el-menu-item @click="router.push({name: 'email'})" index="email"
                       :class="route.meta.name === 'email' ? 'choose-item' : ''">
@@ -173,6 +174,30 @@ function openCompose() {
 
   @media (max-width: 767px) {
     display: none;
+  }
+}
+
+.back-to-bearermail {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: calc(100% - 24px);
+  height: 38px;
+  margin: 0 12px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #d43030;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  line-height: 1;
+  text-decoration: none;
+  cursor: pointer;
+
+  &:hover {
+    background: #f2f2f2;
   }
 }
 
