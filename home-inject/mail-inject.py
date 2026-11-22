@@ -14,10 +14,19 @@ ordinary mail.
                 `Authorization: Bearer <token>`. The backup asks for this
                 every few hours so it knows where alias mail belongs.
 
-Injection is done with the local sendmail (preferred): the raw message is
-piped to sendmail unchanged, so every original header survives and Postfix
-delivers it to Dovecot exactly as it would a message that arrived directly.
-The only header added is the usual Received: line Postfix adds to everything.
+Injection is done by piping the raw message to sendmail inside the plMail
+Postfix (mta) container: `docker exec -i <MTA_CONTAINER> sendmail ...`.
+The message is piped unchanged, so every original header survives and
+Postfix delivers it to Dovecot exactly as it would a message that arrived
+directly. The only header added is the usual Received: line Postfix adds
+to everything.
+
+The container path is preferred on purpose: the host's own
+/usr/sbin/sendmail is Postfix's sendmail binary, but the host Postfix
+daemon is down, so postdrop accepts messages with exit 0 and they sit
+in the host queue forever, never reaching Dovecot. The host sendmail
+binary is used only as a fallback when no container is configured or
+docker is unavailable.
 
 Standard library only: no third-party packages, no pip install.
 
@@ -27,10 +36,14 @@ Configuration (environment, see mail-inject.env):
   MAIL_INJECT_USERS  required. Comma-separated allowlist of home inbox
                      addresses, e.g. you@bearermail.com,friend@bearermail.com
                      Only these users ever receive injected mail.
-  SENDMAIL_BIN       host sendmail binary, default /usr/sbin/sendmail.
-  MTA_CONTAINER      name of the Postfix (mta) container, used only when no
-                     host sendmail exists: mail is piped in with
+  MTA_CONTAINER      name of the Postfix (mta) container, default
+                     plmail-mail-server-mta-1. Injection goes here first:
                      `docker exec -i <container> sendmail ...`.
+  SENDMAIL_BIN       host sendmail binary, default /usr/sbin/sendmail.
+                     Fallback only, used when no container is configured
+                     or docker is unavailable. Do NOT rely on it alone:
+                     the host Postfix daemon is down, so anything handed
+                     to it sits in the host queue forever.
   BIND_HOST          default 127.0.0.1 (do not expose this publicly).
   BIND_PORT          default 8765.
   MAX_BYTES          default 26214400 (25 MB). Larger messages get a 413.
@@ -58,7 +71,7 @@ from urllib.parse import urlsplit
 BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 BIND_PORT = int(os.environ.get("BIND_PORT", "8765"))
 SENDMAIL_BIN = os.environ.get("SENDMAIL_BIN", "/usr/sbin/sendmail")
-MTA_CONTAINER = os.environ.get("MTA_CONTAINER", "").strip()
+MTA_CONTAINER = os.environ.get("MTA_CONTAINER", "plmail-mail-server-mta-1").strip()
 MAX_BYTES = int(os.environ.get("MAX_BYTES", str(25 * 1024 * 1024)))
 PLMAIL_DB_CONTAINER = os.environ.get("PLMAIL_DB_CONTAINER", "plmail-mail-server-database-1")
 PLMAIL_DB_USER = os.environ.get("PLMAIL_DB_USER", "app")
@@ -79,9 +92,11 @@ def log(msg):
 
 
 def sendmail_available():
-    if os.path.exists(SENDMAIL_BIN):
+    # Container first: the host Postfix daemon is down, so the host
+    # sendmail binary accepts mail into a queue that is never processed.
+    if MTA_CONTAINER and shutil.which("docker"):
         return True
-    return bool(MTA_CONTAINER and shutil.which("docker"))
+    return os.path.exists(SENDMAIL_BIN)
 
 
 def extract_from(raw_bytes):
@@ -110,10 +125,15 @@ def inject(user, raw_bytes):
     args.append(user)
 
     try:
-        if os.path.exists(SENDMAIL_BIN):
-            cmd = [SENDMAIL_BIN] + args
-        elif MTA_CONTAINER and shutil.which("docker"):
+        # Container first: the host Postfix daemon is down, so anything
+        # piped to the host sendmail binary sits in the host queue
+        # forever and never reaches Dovecot. Fall back to the host
+        # binary only when no container is configured or docker is
+        # unavailable.
+        if MTA_CONTAINER and shutil.which("docker"):
             cmd = ["docker", "exec", "-i", MTA_CONTAINER, "sendmail"] + args
+        elif os.path.exists(SENDMAIL_BIN):
+            cmd = [SENDMAIL_BIN] + args
         else:
             return False, "no sendmail available"
         proc = subprocess.run(

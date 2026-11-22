@@ -11,11 +11,15 @@ existing Cloudflare Tunnel — never directly.
   This is what the sync worker polls to decide whether home is back.
 - `POST /inject` with JSON `{"token", "user", "rawMime"}` — checks the
   token (constant-time compare) and that `user` is on the allowlist, then
-  pipes the raw message to sendmail, which hands it to Postfix and
-  Postfix delivers it to Dovecot exactly like a message that arrived
-  directly. Every original header survives; the only header added is the
-  usual `Received:` line Postfix adds to everything, and the envelope
-  sender is set to the original `From:` address.
+  pipes the raw message to sendmail inside the plMail Postfix (mta)
+  container (`docker exec -i <MTA_CONTAINER> sendmail ...`), which
+  delivers it to Dovecot exactly like a message that arrived directly.
+  Every original header survives; the only header added is the usual
+  `Received:` line Postfix adds to everything, and the envelope sender
+  is set to the original `From:` address. The container path is used on
+  purpose: the host's own sendmail binary accepts mail into a queue
+  that is never processed (the host Postfix daemon is down), so the
+  host binary is only a fallback when no container is configured.
 - `GET /aliases` — every account's live aliases from plMail, keyed by the
   allowlist mailbox address, e.g.
   `{"support@bearermail.com": ["walmart@bearermail.com", ...]}`. Same
@@ -43,15 +47,20 @@ mkdir -p /opt/mail-inject
 cp mail-inject.py /opt/mail-inject/
 cp mail-inject.service /etc/systemd/system/
 
-# 2. Find the Postfix (mta) container name — needed only if the host has
-#    no /usr/sbin/sendmail of its own (check first: ls /usr/sbin/sendmail)
+# 2. Find the Postfix (mta) container name — injection goes into this
+#    container (default plmail-mail-server-mta-1). Do NOT use the host's
+#    /usr/sbin/sendmail on its own: the host Postfix daemon is down, so
+#    mail handed to it sits in the host queue forever and never reaches
+#    Dovecot.
 docker ps --format '{{.Names}} {{.Image}}' | grep -i -E 'postfix|mta|mail'
 
 # 3. Create the env file (use your real addresses, not the placeholders)
 cat > /opt/mail-inject/mail-inject.env <<'EOF'
 MAIL_INJECT_TOKEN=<paste the token from step 4>
 MAIL_INJECT_USERS=you@bearermail.com,friend@bearermail.com
-MTA_CONTAINER=<container name from step 2, or leave the line out>
+MTA_CONTAINER=plmail-mail-server-mta-1
+#    Set this to the container name from step 2 if yours differs; the
+#    default is plmail-mail-server-mta-1, so the line can be left out.
 # /aliases only — defaults are usually right; set these only if your
 # plMail database container, user or database name differ:
 # PLMAIL_DB_CONTAINER=plmail-mail-server-database-1
@@ -128,7 +137,7 @@ EOF
 
 ## Fallback if sendmail is not available: IMAP APPEND
 
-If neither a host sendmail nor the mta container is reachable, messages
+If neither the mta container nor a host sendmail is reachable, messages
 can be appended straight to a mailbox over IMAP instead. This needs the
 mailbox password (or a Dovecot master user) and the mailstore's IMAP
 address — it is a fallback, not the default path:
