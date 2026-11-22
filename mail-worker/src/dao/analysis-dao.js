@@ -50,18 +50,18 @@ const analysisDao = {
 		const { tzMod, tzBack } = this.tzModifiers(diffHours);
 		const { results } = await c.env.db.prepare(`
             SELECT
-                DATE(create_time, '${tzMod}') AS date,
+                DATE(create_time, ?) AS date,
                 COUNT(*) AS total
             FROM
                 user
             WHERE
-                create_time >= datetime('now', '${tzMod}', 'start of day', '-15 days', '${tzBack}')
-                AND create_time < datetime('now', '${tzMod}', 'start of day', '${tzBack}')
+                create_time >= datetime('now', ?, 'start of day', '-15 days', ?)
+                AND create_time < datetime('now', ?, 'start of day', ?)
             GROUP BY
-                DATE(create_time, '${tzMod}')
+                DATE(create_time, ?)
             ORDER BY
                 date ASC
-        `).all();
+        `).bind(tzMod, tzMod, tzBack, tzMod, tzBack, tzMod).all();
 		return results;
 	},
 
@@ -69,19 +69,19 @@ const analysisDao = {
 		const { tzMod, tzBack } = this.tzModifiers(diffHours);
 		const { results } = await c.env.db.prepare(`
             SELECT
-                DATE(create_time, '${tzMod}') AS date,
+                DATE(create_time, ?) AS date,
                 COUNT(*) AS total
             FROM
                 email
             WHERE
                 type = 0
-                AND create_time >= datetime('now', '${tzMod}', 'start of day', '-15 days', '${tzBack}')
-                AND create_time < datetime('now', '${tzMod}', 'start of day', '${tzBack}')
+                AND create_time >= datetime('now', ?, 'start of day', '-15 days', ?)
+                AND create_time < datetime('now', ?, 'start of day', ?)
             GROUP BY
-                DATE(create_time, '${tzMod}')
+                DATE(create_time, ?)
             ORDER BY
                 date ASC
-        `).all();
+        `).bind(tzMod, tzMod, tzBack, tzMod, tzBack, tzMod).all();
 		return results;
 	},
 
@@ -89,19 +89,19 @@ const analysisDao = {
 		const { tzMod, tzBack } = this.tzModifiers(diffHours);
 		const { results } = await c.env.db.prepare(`
             SELECT
-                DATE(create_time, '${tzMod}') AS date,
+                DATE(create_time, ?) AS date,
                 COUNT(*) AS total
             FROM
                 email
             WHERE
                 type = 1
-                AND create_time >= datetime('now', '${tzMod}', 'start of day', '-15 days', '${tzBack}')
-                AND create_time < datetime('now', '${tzMod}', 'start of day', '${tzBack}')
+                AND create_time >= datetime('now', ?, 'start of day', '-15 days', ?)
+                AND create_time < datetime('now', ?, 'start of day', ?)
             GROUP BY
-                DATE(create_time, '${tzMod}')
+                DATE(create_time, ?)
             ORDER BY
                 date ASC
-        `).all();
+        `).bind(tzMod, tzMod, tzBack, tzMod, tzBack, tzMod).all();
 		return results;
 	},
 

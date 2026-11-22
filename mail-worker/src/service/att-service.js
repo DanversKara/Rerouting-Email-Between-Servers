@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid';
 import domainUtils from '../utils/domain-uitls';
 import settingService from "./setting-service";
 import proxyService from './proxy-service';
+import BizError from '../error/biz-error';
 import { ATT_CACHE_CONTROL, isDangerousAttType, isSafeInlineAtt } from '../utils/att-headers';
 
 const attService = {
@@ -256,6 +257,13 @@ const attService = {
 	},
 
 	async removeAttByField(c, fieldName, fieldValues) {
+
+		// Column names cannot be bound as parameters, so the field is
+		// allow-listed here: every caller passes a hardcoded literal.
+		const ALLOWED_FIELDS = ['user_id', 'email_id', 'account_id'];
+		if (!ALLOWED_FIELDS.includes(fieldName)) {
+			throw new BizError(`Invalid attachment field: ${fieldName}`);
+		}
 
 		const sqlList = [];
 
