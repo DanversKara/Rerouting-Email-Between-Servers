@@ -1,11 +1,12 @@
 // Cloud Mail merge-back sync worker.
 //
-// Every 5 minutes (cron) this worker checks whether the home mail server is
-// reachable again. While home is down it records when the outage started.
-// On the down -> up transition it lists every message Cloud Mail received
-// during the outage, fetches the untouched original for each one, and hands
-// it to the home injection endpoint, which drops it into the right user's
-// Dovecot inbox. The mail then looks like ordinary mail in plMail.
+// Cloudflare Email Routing is the front door for bearermail.com: ALL
+// inbound mail lands in Cloud Mail first, and this worker carries it home
+// into Dovecot continuously, so it shows up as ordinary mail in plMail.
+// Every 5 minutes (cron) — and on a manual GET /sync — it lists every
+// received message newer than the last one it processed, fetches the
+// untouched original for each one, and hands it to the home injection
+// endpoint, which drops it into the right user's inbox.
 //
 // No Resend, no Mailjet, no SMTP relay anywhere here: the handoff is a
 // plain HTTPS POST from this worker to the home endpoint, and delivery home
@@ -13,7 +14,10 @@
 // burn through.
 //
 // State lives in the SYNC_KV namespace:
-//   home_down_since  ISO timestamp of when the outage was first noticed
+//   last_email_id    highest emailId fully processed (synced or deliberately
+//                    skipped); the next run starts just above it
+//   home_down_since  ISO timestamp of when home was last noticed down
+//                    (observability only — it never gates syncing)
 //   cloudmail_token  cached admin JWT for the Cloud Mail API
 //   synced:<id>      "1" once a message was delivered home (30 day TTL,
 //                    so a crash mid-sync can never deliver the same
@@ -22,6 +26,7 @@
 // Cloud Mail copies are NOT deleted after sync; that stays the user's call.
 
 const KV_DOWN_SINCE = 'home_down_since';
+const KV_LAST_ID = 'last_email_id';
 const KV_TOKEN = 'cloudmail_token';
 const SYNCED_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const MAX_PER_RUN = 200; // messages moved per cron run; the rest wait for the next run
@@ -44,54 +49,61 @@ export default {
 
 // One full check-and-sync pass. Returns a summary object (also logged).
 async function runSync(env) {
-	const summary = { home: 'unknown', outageSince: null, listed: 0, synced: 0, skipped: 0, failed: 0 };
+	const summary = { home: 'unknown', lastEmailId: 0, listed: 0, synced: 0, skipped: 0, failed: 0 };
 	try {
 		const up = await isHomeUp(env);
 		summary.home = up ? 'up' : 'down';
 
+		// The cursor is the highest emailId fully processed (synced or
+		// deliberately skipped). It only ever moves forward.
+		let cursor = Number(await env.SYNC_KV.get(KV_LAST_ID) || '0') || 0;
+		summary.lastEmailId = cursor;
+
 		if (!up) {
+			// Record when the outage was first noticed, for observability
+			// only. It no longer gates syncing: every run syncs everything
+			// above the cursor while home is up, outage or not.
 			const existing = await env.SYNC_KV.get(KV_DOWN_SINCE);
 			if (!existing) {
 				await env.SYNC_KV.put(KV_DOWN_SINCE, new Date().toISOString());
 			}
-			summary.outageSince = existing || new Date().toISOString();
 			return summary;
 		}
 
-		const downSince = await env.SYNC_KV.get(KV_DOWN_SINCE);
-		if (!downSince) {
-			return summary; // home is up and no outage was recorded
-		}
-		summary.outageSince = downSince;
+		// Home is up: a stale down marker, if any, is no longer meaningful.
+		await env.SYNC_KV.delete(KV_DOWN_SINCE);
 
-		const startSql = toSqlTime(new Date(downSince));
-		const endSql = toSqlTime(new Date());
-		const rows = await listOutageMail(env, startSql, endSql);
+		const rows = await listMailSince(env, cursor);
 		summary.listed = rows.length;
 
 		const userMap = parseUserMap(env.USER_MAP);
 		let failed = 0;
-		let truncated = false;
 
 		for (const row of rows) {
 			if (summary.synced + summary.skipped + failed >= MAX_PER_RUN) {
-				truncated = true; // leave the rest for the next run; down_since stays set
-				break;
+				break; // leave the rest for the next run; the cursor stays where it is
 			}
 			const outcome = await syncOne(env, row, userMap);
-			if (outcome === 'synced') summary.synced++;
-			else if (outcome === 'skipped') summary.skipped++;
-			else failed++;
+			if (outcome === 'synced') {
+				summary.synced++;
+				cursor = row.emailId;
+			} else if (outcome === 'skipped') {
+				summary.skipped++;
+				cursor = row.emailId;
+			} else {
+				// Failed: stop here, do not advance past this row and do
+				// not process further rows this run, so the next run
+				// retries it from the same cursor.
+				failed++;
+				break;
+			}
 		}
 		summary.failed = failed;
 
-		// Only close the outage window once every listed message was either
-		// synced or deliberately skipped. A failure, or stopping early at
-		// the per-run cap, keeps the window open so the next run retries
-		// (or continues with) the ones that did not go through.
-		if (failed === 0 && !truncated) {
-			await env.SYNC_KV.delete(KV_DOWN_SINCE);
-		}
+		// Persist the cursor even when nothing was listed; the value is
+		// unchanged in that case.
+		await env.SYNC_KV.put(KV_LAST_ID, String(cursor));
+		summary.lastEmailId = cursor;
 		return summary;
 	} catch (e) {
 		console.error('sync pass failed:', e);
@@ -124,14 +136,6 @@ function parseUserMap(raw) {
 		console.error('USER_MAP is not valid JSON:', e);
 		return {};
 	}
-}
-
-// Cloud Mail create_time is SQLite CURRENT_TIMESTAMP (UTC), so the outage
-// window is formatted the same way: 'YYYY-MM-DD HH:mm:ss'.
-function toSqlTime(date) {
-	const pad = (n) => String(n).padStart(2, '0');
-	return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ` +
-		`${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}`;
 }
 
 function cloudmailUrl(env, path) {
@@ -187,23 +191,26 @@ async function cloudmailFetch(env, path, init) {
 	return res;
 }
 
-// All received mail in the outage window, oldest first, via the admin
+// All received mail above the cursor, oldest first, via the admin
 // /allEmail/list endpoint (the per-user /email/list only ever returns the
 // caller's own mail). Paginates with the emailId cursor, 50 rows a page.
-async function listOutageMail(env, startSql, endSql) {
+// No date window: with Email Routing as the front door, mail arrives
+// continuously while home is up, so every run syncs everything newer than
+// the last processed emailId. startDate/endDate are optional in
+// emailService.allList (they only add a filter when present), so they are
+// omitted here.
+async function listMailSince(env, cursor) {
 	const rows = [];
-	let cursor = 0;
+	let pageCursor = cursor;
 	for (;;) {
 		const params = new URLSearchParams({
 			type: 'receive',
-			startDate: startSql,
-			endDate: endSql,
 			timeSort: '1',
 			size: '50',
 			// full=1: the brief columns omit userId/accountId, and the sync
 			// needs userId to map each message to a home inbox.
 			full: '1',
-			emailId: String(cursor),
+			emailId: String(pageCursor),
 		});
 		const res = await cloudmailFetch(env, `/api/allEmail/list?${params.toString()}`, { method: 'GET' });
 		const body = await res.json().catch(() => null);
@@ -215,7 +222,7 @@ async function listOutageMail(env, startSql, endSql) {
 		if (page.length < 50) {
 			break;
 		}
-		cursor = page[page.length - 1].emailId;
+		pageCursor = page[page.length - 1].emailId;
 		if (rows.length >= 5000) {
 			break; // safety valve; the next run picks up where this one stopped
 		}
