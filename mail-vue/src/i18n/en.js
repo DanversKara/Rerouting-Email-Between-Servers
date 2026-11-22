@@ -183,6 +183,8 @@ const en = {
     loginDomain: 'Hide sign-in domain',
     syncDelete: 'Sync delete',
     syncDeleteDesc: 'When enabled, emails, email addresses, and accounts deleted by users are permanently removed.',
+    publicApi: 'Public API',
+    publicApiDesc: 'When enabled, the /public API accepts the bearer token (mail list, add user). Keep it off unless an integration needs it.',
     multipleEmail: 'Multiple email address',
     multipleEmailDesc: 'Enable this feature to allow users to add multiple addresses.',
     customization: 'Customization',

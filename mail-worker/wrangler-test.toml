@@ -52,7 +52,7 @@ orm_log = false			# SQL logging
 domain = ["example.com"]				# Mail domains; multiple allowed, e.g. ["example1.com","example2.com"]
 admin = "admin@example.com"				# Admin email, e.g. admin@example.com
 password = ""					# Admin password; used on init if the admin user does not exist
-jwt_secret = "b7f29a1d-18e2-4d3b-941f-f6b2c97c02fd"			# JWT secret; any random string
+jwt_secret = ""  # NEVER commit a real secret here - set JWT_SECRET via GitHub Secrets / .dev.vars
 
 [build]
 command = "pnpm --prefix ../mail-vue install && pnpm --prefix ../mail-vue run build"

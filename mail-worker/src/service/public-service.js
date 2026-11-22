@@ -6,11 +6,12 @@ import saltHashUtils from '../utils/crypto-utils';
 import cryptoUtils from '../utils/crypto-utils';
 import emailUtils from '../utils/email-utils';
 import roleService from './role-service';
+import settingService from './setting-service';
 import verifyUtils from '../utils/verify-utils';
 import { t } from '../i18n/i18n';
 import reqUtils from '../utils/req-utils';
 import dayjs from 'dayjs';
-import { isDel, roleConst } from '../const/entity-const';
+import { isDel, roleConst, settingConst } from '../const/entity-const';
 import email from '../entity/email';
 import userService from './user-service';
 import KvConst from '../const/kv-const';
@@ -46,6 +47,19 @@ const publicService = {
 
 		size = Number(size);
 		num = Number(num);
+
+		// The public list has no per-user scope, so cap the page size
+		// server-side: a caller must not dump the whole mailbox in one
+		// call by passing size=100000.
+		if (!Number.isSafeInteger(size) || size < 1) {
+			size = 20;
+		}
+		if (size > 100) {
+			size = 100;
+		}
+		if (!Number.isSafeInteger(num) || num < 1) {
+			num = 1;
+		}
 
 		num = (num - 1) * size;
 
@@ -129,23 +143,20 @@ const publicService = {
 
 		const userList = [];
 
+		// The public API must not let a token holder pick a role: every
+		// account it creates gets the default role. A privileged role
+		// (all-email:query, user:*) must only ever be assigned by an
+		// admin in the Role UI.
 		for (const emailRow of list) {
-			let { email, hash, salt, roleName } = emailRow;
-			let type = defRole.roleId;
+			let { email, hash, salt } = emailRow;
+			const type = defRole.roleId;
 
-			if (roleName) {
-				const roleRow = roleList.find(role => role.name === roleName);
-				type = roleRow ? roleRow.roleId : type;
-			}
-
-			const userSql = `INSERT INTO user (email, password, salt, type, os, browser, active_ip, create_ip, device, active_time, create_time)
-			VALUES ('${email}', '${hash}', '${salt}', '${type}', '${os}', '${browser}', '${activeIp}', '${activeIp}', '${device}', '${activeTime}', '${activeTime}')`
-
-			const accountSql = `INSERT INTO account (email, name, user_id)
-			VALUES ('${email}', '${emailUtils.getName(email)}', 0);`;
-
-			userList.push(c.env.db.prepare(userSql));
-			userList.push(c.env.db.prepare(accountSql));
+			userList.push(
+				c.env.db.prepare(`INSERT INTO user (email, password, salt, type, os, browser, active_ip, create_ip, device, active_time, create_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).bind(email, hash, salt, type, os, browser, activeIp, activeIp, device, activeTime, activeTime)
+			);
+			userList.push(
+				c.env.db.prepare(`INSERT INTO account (email, name, user_id) VALUES (?, ?, 0)`).bind(email, emailUtils.getName(email))
+			);
 
 		}
 
@@ -165,6 +176,12 @@ const publicService = {
 
 	async genToken(c, params) {
 
+		// No token can be minted while the public API is closed.
+		const setting = await settingService.query(c);
+		if (setting.publicApi !== settingConst.publicApi.OPEN) {
+			throw new BizError(t('publicApiClosed'), 403);
+		}
+
 		await this.verifyUser(c, params)
 
 		const uuid = uuidv4();
@@ -172,6 +189,18 @@ const publicService = {
 		await c.env.kv.put(KvConst.PUBLIC_KEY, uuid);
 
 		return {token: uuid}
+	},
+
+	// Revoke the public API token: deletes the KV key, so the old
+	// token stops working immediately. The admin password is checked
+	// first, same as genToken.
+	async revokeToken(c, params) {
+
+		await this.verifyUser(c, params)
+
+		await c.env.kv.delete(KvConst.PUBLIC_KEY);
+
+		return {}
 	},
 
 	async verifyUser(c, params) {

@@ -18,6 +18,18 @@
                 </div>
               </div>
               <div class="setting-item">
+                <div>
+                  <span>{{ $t('publicApi') }}</span>
+                  <el-tooltip effect="dark" :content="$t('publicApiDesc')">
+                    <Icon class="warning" icon="fe:warning" width="18" height="18"/>
+                  </el-tooltip>
+                </div>
+                <div>
+                  <el-switch @change="change" :before-change="beforeChange" :active-value="0" :inactive-value="1"
+                             v-model="setting.publicApi"/>
+                </div>
+              </div>
+              <div class="setting-item">
                 <div><span>{{ $t('loginDomain') }}</span></div>
                 <div>
                   <el-switch @change="change" :before-change="beforeChange" :active-value="1" :inactive-value="0"

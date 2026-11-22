@@ -24,6 +24,7 @@ const dbInit = {
 		await this.v3_4DB(c);
 		await this.v3_5DB(c);
 		await this.v3_6DB(c);
+		await this.v3_7DB(c);
 		await userService.initAdmin(c);
 		await settingService.refresh(c);
 		return c.text('success');
@@ -45,6 +46,17 @@ const dbInit = {
 				c.env.db.prepare(`ALTER TABLE setting ADD COLUMN login_verify INTEGER NOT NULL DEFAULT 1`),
 				c.env.db.prepare(`ALTER TABLE setting ADD COLUMN login_verify_count INTEGER NOT NULL DEFAULT 1`)
 			]);
+		} catch (e) {
+			console.warn(`sql skip:${e.message}`);
+		}
+	},
+
+	async v3_7DB(c) {
+		// Public API defaults to closed (fail closed): a missing or
+		// unset value must never expose /public/*. Fresh installs seed
+		// public_api = 1 (CLOSE) in intDB below.
+		try {
+			await c.env.db.prepare(`ALTER TABLE setting ADD COLUMN public_api INTEGER NOT NULL DEFAULT 1;`).run();
 		} catch (e) {
 			console.warn(`sql skip:${e.message}`);
 		}
@@ -461,7 +473,7 @@ const dbInit = {
 						tg_bot_token, tg_chat_id, tg_bot_status, forward_email, forward_status, rule_email, rule_type,
 						reg_key, reg_verify_count, add_verify_count,
 						notice_title, notice_content, notice_type, notice_duration, notice_offset, notice_position, notice_width, notice, no_recipient,
-						login_domain, bucket, region, endpoint, s3_access_key, s3_secret_key
+						login_domain, bucket, region, endpoint, s3_access_key, s3_secret_key, public_api
 					)
 					// Fresh installs default to sign-up closed and invite-code
 					// required: open self-registration lets anyone squat an
@@ -473,7 +485,7 @@ const dbInit = {
 						'', '', 1, '', 1, '', 0,
 						0, 1, 1,
 						'Cloud Mail', ?, 'none', 0, 0, 'top-right', 340, 0, 1,
-						0, '', '', '', '', ''
+						0, '', '', '', '', '', 1''
 					WHERE NOT EXISTS (SELECT 1 FROM setting)
 				`).bind(noticeContent),
 				c.env.db.prepare(`

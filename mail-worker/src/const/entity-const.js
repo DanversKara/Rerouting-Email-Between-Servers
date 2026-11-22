@@ -141,6 +141,10 @@ export const settingConst = {
 		OPEN: 0,
 		CLOSE: 1
 	},
+	publicApi: {
+		OPEN: 0,
+		CLOSE: 1
+	},
 	syncDelete: {
 		OPEN: 0,
 		CLOSE: 1

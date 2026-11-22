@@ -5,6 +5,8 @@ import KvConst from '../const/kv-const';
 import dayjs from 'dayjs';
 import userService from '../service/user-service';
 import permService from '../service/perm-service';
+import settingService from '../service/setting-service';
+import { settingConst } from '../const/entity-const';
 import { t } from '../i18n/i18n'
 import app from '../hono/hono';
 
@@ -18,6 +20,7 @@ const exclude = [
 	'/webhooks',
 	'/init',
 	'/public/genToken',
+	'/public/revokeToken',
 	'/telegram',
 	'/test',
 	'/oauth'
@@ -105,6 +108,14 @@ app.use('*', async (c, next) => {
 
 	if (path.startsWith('/public')) {
 
+		// The public API is closed unless the admin explicitly enabled
+		// it. A missing setting (rows/caches from before this column
+		// existed) reads as closed -- fail closed, and answer exactly
+		// like a bad token so the setting is not leaked.
+		const setting = await settingService.query(c);
+		if (setting.publicApi !== settingConst.publicApi.OPEN) {
+			throw new BizError(t('publicTokenFail'), 401);
+		}
 		const userPublicToken = await c.env.kv.get(KvConst.PUBLIC_KEY);
 		const publicToken = c.req.header(constant.TOKEN_HEADER);
 		if (publicToken !== userPublicToken) {

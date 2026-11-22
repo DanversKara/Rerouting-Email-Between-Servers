@@ -8,6 +8,10 @@ import oauthService from './service/oauth-service';
 import analysisService from './service/analysis-service';
 import { handleWsUpgrade } from './websocket/connect';
 import proxyService from './service/proxy-service';
+import jwtUtils from './utils/jwt-utils';
+import constant from './const/constant';
+import KvConst from './const/kv-const';
+import attService from './service/att-service';
 export { MailHub } from './websocket/hub'; // Durable Object 必须从 Worker 入口导出
 // Mail originals live under raw/<emailId>.eml in object storage. Those keys
 // are sequential integers, so anyone could enumerate them — the public
@@ -29,6 +33,36 @@ function withFrameHeaders(resp) {
 	headers.set('X-Frame-Options', 'SAMEORIGIN');
 	headers.set('Content-Security-Policy', "frame-ancestors 'self'");
 	return new Response(resp.body, { status: resp.status, headers });
+}
+
+// Attachment access: a signed 1-hour link minted for the owner, or a
+// logged-in session (same checks as the /api middleware) for the owner
+// or the admin. Anything else is a 404 -- missing and foreign
+// attachments are indistinguishable.
+async function verifyAttAccess(req, env, key) {
+	const url = new URL(req.url);
+	const exp = url.searchParams.get('exp');
+	const sig = url.searchParams.get('sig');
+	if (exp && sig && await proxyService.verifyAttSignature(env, key, exp, sig)) {
+		return true;
+	}
+	const jwt = req.headers.get(constant.TOKEN_HEADER);
+	if (!jwt) {
+		return false;
+	}
+	const result = await jwtUtils.verifyToken({ env }, jwt);
+	if (!result || result.gen !== constant.AUTH_GEN) {
+		return false;
+	}
+	const authInfo = await env.kv.get(KvConst.AUTH_INFO + result.userId, { type: 'json' });
+	if (!authInfo || !authInfo.tokens.includes(result.token)) {
+		return false;
+	}
+	if (authInfo.user.email === env.admin) {
+		return true;
+	}
+	const rows = await attService.selectByKey({ env }, key);
+	return rows.some(row => row.userId === authInfo.user.userId);
 }
 
 export default {
@@ -64,7 +98,20 @@ export default {
 			return resp ? withFrameHeaders(resp) : new Response('Not Found', { status: 404 });
 		}
 
-		 if (['/static/','/attachments/'].some(p => url.pathname.startsWith(p))) {
+	 // Attachments are private: only the owner (or the admin) may fetch
+		 // one, via a signed link or a logged-in session. /static/ stays
+		 // public -- it serves admin-chosen images such as the login-page
+		 // background that signed-out visitors must see.
+		 if (url.pathname.startsWith('/attachments/')) {
+			 const key = url.pathname.substring(1);
+			 if (!await verifyAttAccess(req, env, key)) {
+				 return new Response('Not Found', { status: 404 });
+			 }
+			 const resp = await r2Service.toObjResp({ env }, key);
+			 return resp ? withFrameHeaders(resp) : new Response('Not Found', { status: 404 });
+		 }
+
+		 if (url.pathname.startsWith('/static/')) {
 			 const resp = await r2Service.toObjResp({ env }, url.pathname.substring(1));
 			 return resp ? withFrameHeaders(resp) : new Response('Not Found', { status: 404 });
 		 }

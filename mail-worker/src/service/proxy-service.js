@@ -31,7 +31,7 @@ const proxyService = {
 			return html;
 		}
 		const { r2Domain } = await settingService.query(c);
-		return this.applyRewrite(html, this.rewriter(await this.signingKey(c.env), r2Domain), r2Domain);
+		return this.applyRewrite(html, this.rewriter(await this.signingKey(c.env), await this.attSigningKey(c.env), r2Domain), r2Domain);
 	},
 
 	// 批量改写邮件列表的 content，R2 域名只查一次。
@@ -40,7 +40,7 @@ const proxyService = {
 			return list;
 		}
 		const { r2Domain } = await settingService.query(c);
-		const rewriteUrl = this.rewriter(await this.signingKey(c.env), r2Domain);
+		const rewriteUrl = this.rewriter(await this.signingKey(c.env), await this.attSigningKey(c.env), r2Domain);
 		for (const item of list) {
 			if (!item.content) {
 				continue;
@@ -176,16 +176,125 @@ const proxyService = {
 		return crypto.subtle.importKey('raw', key, algorithm, false, ['sign', 'verify']);
 	},
 
+	// Attachment signing uses the same pattern as the image proxy, but a
+	// separate derived key: a /proxy signature must never double as an
+	// attachment signature. The browser cannot send the login
+	// Authorization header on plain <a download> clicks or <img> loads,
+	// so attachment URLs the browser fetches are minted server-side
+	// with a 1-hour HMAC signature instead (same TTL as /proxy links).
+	async attSigningKey(env) {
+		if (!env.jwt_secret) {
+			throw new Error('Missing jwt_secret for attachment signing');
+		}
+		const algorithm = { name: 'HMAC', hash: 'SHA-256' };
+		const root = await crypto.subtle.importKey('raw', encoder.encode(env.jwt_secret), algorithm, false, ['sign']);
+		// 从现有部署密钥派生附件专用密钥。
+		const key = await crypto.subtle.sign('HMAC', root, encoder.encode('cloud-mail/attachment/v1'));
+		return crypto.subtle.importKey('raw', key, algorithm, false, ['sign', 'verify']);
+	},
+
+	// 拼浏览器可直接请求的签名附件地址。attKey 是完整存储 key
+	//（attachments/<hash>.<ext>）。
+	async toAttPath(attKey, exp, keyObj) {
+		const signature = await crypto.subtle.sign('HMAC', keyObj, this.signatureInput(attKey, exp));
+		const sig = btoa(String.fromCharCode(...new Uint8Array(signature)))
+			.replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+		return '/' + attKey + '?' + new URLSearchParams({ exp, sig });
+	},
+
+	// 给一行附件记录拼签名地址（下载链接、图片预览、内联图共用）。
+	async attUrl(env, attKey) {
+		const exp = String(Math.floor(Date.now() / 1000) + PROXY_LINK_TTL);
+		return this.toAttPath(attKey, exp, await this.attSigningKey(env));
+	},
+
+	// 校验签名附件链接：签名、过期时间、存储 key 三者一致才放行。
+	async verifyAttSignature(env, attKey, exp, sig) {
+		try {
+			const signature = this.decodeSignature(sig);
+			if (!signature || !/^[1-9]\d{0,12}$/.test(exp) || Number(exp) <= Math.floor(Date.now() / 1000)) {
+				return false;
+			}
+			const keyObj = await this.attSigningKey(env);
+			return await crypto.subtle.verify('HMAC', keyObj, signature, this.signatureInput(attKey, exp));
+		} catch {
+			return false;
+		}
+	},
+
+	// 从附件地址（签名或未签名、相对或绝对、带或不带 {{domain}}）
+	// 还原完整存储 key；不是本站附件地址返回 null。
+	fromAttPath(raw) {
+		if (!raw) {
+			return null;
+		}
+		let path = String(raw).trim();
+		if (path.startsWith('{{domain}}')) {
+			path = path.slice('{{domain}}'.length);
+		}
+		try {
+			path = new URL(path, 'https://att.invalid/').pathname;
+		} catch {
+			return null;
+		}
+		if (!path.startsWith('/attachments/')) {
+			return null;
+		}
+		const key = path.slice(1);
+		return key === 'attachments/' ? null : key;
+	},
+
+	// 正文里的本站附件引用收成存储 key；外链（包括其它域名的
+	// /attachments/ 路径）返回 null。已签名的附件链接会重新签名，
+	// 保证每次改写都拿到新鲜的过期时间。
+	attRefKey(raw, r2Domain) {
+		if (!raw) {
+			return null;
+		}
+		const value = String(raw).trim();
+		if (!value || /^(data:|blob:|cid:)/i.test(value)) {
+			return null;
+		}
+		let path = value;
+		if (path.startsWith('{{domain}}')) {
+			path = path.slice('{{domain}}'.length);
+		}
+		if (path.startsWith('//')) {
+			path = 'https:' + path;
+		}
+		if (/^[a-z][a-z0-9+.-]*:/i.test(path)) {
+			const origin = this.r2Origin(r2Domain);
+			if (!origin) {
+				return null;
+			}
+			try {
+				if (new URL(path).origin !== origin) {
+					return null;
+				}
+			} catch {
+				return null;
+			}
+		}
+		return this.fromAttPath(path);
+	},
+
 	signatureInput(url, exp) {
 		return encoder.encode(JSON.stringify([url, exp]));
 	},
 
-	rewriter(key, r2Domain) {
+	rewriter(proxyKey, attKey, r2Domain) {
 		const exp = String(Math.floor(Date.now() / 1000) + PROXY_LINK_TTL);
-		return raw => {
+		return async raw => {
+			// Local attachments are signed for /attachments/ instead of
+			// being proxied: the browser fetches them directly, and a
+			// signed link is the only credential it can carry.
+			const attKey2 = this.attRefKey(raw, r2Domain);
+			if (attKey2) {
+				return this.toAttPath(attKey2, exp, attKey);
+			}
 			const restored = this.fromProxyPath(raw);
 			const url = restored || (this.shouldProxyUrl(raw, r2Domain) ? this.absoluteUrl(raw) : null);
-			return url ? this.toProxyPath(url, exp, key) : null;
+			return url ? this.toProxyPath(url, exp, proxyKey) : null;
 		};
 	},
 
@@ -283,6 +392,14 @@ const proxyService = {
 			const original = this.fromProxyPath(el.getAttribute(attr));
 			if (original) {
 				el.setAttribute(attr, original);
+				return;
+			}
+			// Signed (or plain) attachment links go back to the stored
+			// {{domain}} form before sending, so the outgoing mail keeps
+			// working inline images instead of 1-hour links.
+			const attKey = this.fromAttPath(el.getAttribute(attr));
+			if (attKey) {
+				el.setAttribute(attr, '{{domain}}' + attKey);
 			}
 		};
 
@@ -391,6 +508,11 @@ const proxyService = {
 			const original = this.fromProxyPath(bits[0]);
 			if (original) {
 				bits[0] = original;
+			} else {
+				const attKey = this.fromAttPath(bits[0]);
+				if (attKey) {
+					bits[0] = '{{domain}}' + attKey;
+				}
 			}
 			return bits.join(' ');
 		}).join(', ');
@@ -417,10 +539,14 @@ const proxyService = {
 		}
 		return String(css).replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (match, quote, url) => {
 			const original = this.fromProxyPath(url);
-			if (!original) {
+			if (original) {
+				return `url(${quote}${original}${quote})`;
+			}
+			const attKey = this.fromAttPath(url);
+			if (!attKey) {
 				return match;
 			}
-			return `url(${quote}${original}${quote})`;
+			return 'url(' + quote + '{{domain}}' + attKey + quote + ')';
 		});
 	},
 

@@ -62,6 +62,10 @@ const settingService = {
 		setting.projectLink = projectLink;
 		setting.loginVerify ??= settingConst.loginVerify.CLOSE;
 		setting.loginVerifyCount ??= 1;
+		// Public API is closed unless explicitly enabled (fail closed:
+		// rows and caches created before this column existed have no
+		// value, and the safe default is off).
+		setting.publicApi ??= settingConst.publicApi.CLOSE;
 
 		setting.emailPrefixFilter = setting.emailPrefixFilter.split(",").filter(Boolean);
 		setting.autoRefresh = Number(setting.autoRefresh) === 1 ? 1 : 2; // 1 关闭，2 开启

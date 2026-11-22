@@ -183,6 +183,8 @@ const zh = {
     loginDomain: '隐藏登录域名',
     syncDelete: '同步删除',
     syncDeleteDesc: '开启后，用户删除的邮件、邮箱地址和账号会直接清除数据',
+    publicApi: '公开 API',
+    publicApiDesc: '开启后，/public API（邮件列表、添加用户）接受令牌访问。不需要集成时请保持关闭。',
     multipleEmail: '多号模式',
     multipleEmailDesc: '开启后账号栏出现一个用户可以添加多个邮箱',
     customization: '个性化设置',

@@ -40,10 +40,10 @@ const attService = {
 		await orm(c).insert(att).values(attachments).run();
 	},
 
-	list(c, params, userId) {
+	async list(c, params, userId) {
 		const { emailId } = params;
 
-		return orm(c).select().from(att).where(
+		const rows = orm(c).select().from(att).where(
 			and(
 				eq(att.emailId, emailId),
 				eq(att.userId, userId),
@@ -51,6 +51,29 @@ const attService = {
 				isNull(att.contentId)
 			)
 		).all();
+		return this.signAttRows(c, rows);
+	},
+
+	// Every attachment row the browser will fetch gets a signed 1-hour
+	// URL: the browser cannot send the login header on plain <a> / <img>
+	// requests, so the signature is its credential.
+	async signAttRows(c, rows) {
+		if (!rows || rows.length === 0) {
+			return rows;
+		}
+		for (const row of rows) {
+			if (row.key) {
+				row.url = await proxyService.attUrl(c.env, row.key);
+			}
+		}
+		return rows;
+	},
+
+	// All attachment rows sharing one storage key (same file content
+	// can belong to several users). The ownership check must see every
+	// row, not just one grouped row.
+	selectByKey(c, key) {
+		return orm(c).select().from(att).where(eq(att.key, key)).all();
 	},
 
 	async toImageUrlHtml(c, content) {

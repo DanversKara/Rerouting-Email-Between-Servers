@@ -780,6 +780,7 @@ const emailService = {
 		}
 
 		const attList = await attService.selectByEmailIds(c, [emailResult.emailId]);
+		await attService.signAttRows(c, attList);
 		emailResult.attList = attList;
 
 		const dateStr = dayjs().format('YYYY-MM-DD');
@@ -1445,6 +1446,10 @@ const emailService = {
 				const atts = attList.filter(attRow => attRow.emailId === emailRow.emailId);
 				emailRow.attList = atts;
 			});
+
+			// Sign every attachment URL the browser will fetch (download
+			// links, image previews, inline body images).
+			await attService.signAttRows(c, attList);
 		}
 
 		// 完整邮件查询：给附件后，把正文外链图改成 /proxy?url=。
