@@ -1,0 +1,19 @@
+[Unit]
+Description=Cloud Mail merge-back injection endpoint
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as root: it needs `docker exec` into the mta container and sendmail
+# -f (envelope sender). If you use the host sendmail path and your Postfix
+# permits -f for a dedicated user, you can drop this to that user instead.
+User=root
+WorkingDirectory=/opt/mail-inject
+EnvironmentFile=/opt/mail-inject/mail-inject.env
+ExecStart=/usr/bin/python3 /opt/mail-inject/mail-inject.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

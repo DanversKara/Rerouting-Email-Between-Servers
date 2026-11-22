@@ -3,6 +3,7 @@ import emailService from '../service/email-service';
 import accountService from '../service/account-service';
 import settingService from '../service/setting-service';
 import attService from '../service/att-service';
+import r2Service from '../service/r2-service';
 import constant from '../const/constant';
 import fileUtils from '../utils/file-utils';
 import { emailConst, isDel, settingConst } from '../const/entity-const';
@@ -13,6 +14,10 @@ import telegramService from '../service/telegram-service';
 import aiService from '../service/ai-service';
 import webhookService from '../service/webhook-service';
 import { notifyMailWs } from '../websocket/notify';
+
+// Merge-back: R2 key prefix for the untouched original message bytes.
+// Keep in sync with the same value in api/email-api.js.
+const RAW_PREFIX = 'raw/';
 
 export async function email(message, env, ctx) {
 
@@ -157,6 +162,19 @@ export async function email(message, env, ctx) {
 			}
 		} catch (e) {
 			console.error(e);
+		}
+
+		// Merge-back: keep the untouched original message bytes so the sync
+		// worker can push the original home byte-for-byte when the home lab
+		// comes back. Stored under raw/<emailId>.eml, no D1 schema change.
+		// A failure here must never reject mail that was already accepted.
+		try {
+			await r2Service.putObj({ env }, RAW_PREFIX + emailRow.emailId + '.eml', content, {
+				contentType: 'message/rfc822',
+				contentDisposition: `attachment;filename=${emailRow.emailId}.eml`
+			});
+		} catch (e) {
+			console.error('保存原始邮件失败：', e);
 		}
 
 		emailRow = await emailService.completeReceive({ env }, account ? emailConst.status.RECEIVE : emailConst.status.NOONE, emailRow.emailId);

@@ -1,0 +1,23 @@
+name = "cloud-mail-sync"
+main = "src/index.js"
+compatibility_date = "2025-06-04"
+
+[triggers]
+crons = ["*/5 * * * *"]
+
+[[kv_namespaces]]
+binding = "SYNC_KV"
+id = "" # create with: wrangler kv namespace create SYNC_KV
+
+[vars]
+# Public URL of the deployed Cloud Mail app, no trailing slash.
+CLOUDMAIL_URL = ""
+# Health endpoint of the home injection service (see ../home-inject/).
+# Must answer 2xx only when home is ready to take mail.
+HOME_HEALTH_URL = ""
+# Injection endpoint of the home service.
+HOME_INJECT_URL = ""
+# JSON map of Cloud Mail userId -> home inbox address.
+# Example: {"1": "you@bearermail.com", "2": "friend@bearermail.com"}
+# Find the userIds in Cloud Mail under Admin -> Users.
+USER_MAP = ""

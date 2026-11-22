@@ -1,0 +1,147 @@
+# Home injection endpoint
+
+A tiny Python service (standard library only) that the Cloudflare sync
+worker calls to put waiting mail back into the home Dovecot inboxes.
+It listens on localhost only and is reached from the internet through the
+existing Cloudflare Tunnel — never directly.
+
+## What it does
+
+- `GET /health` — 200 when an injection path is available, 503 otherwise.
+  This is what the sync worker polls to decide whether home is back.
+- `POST /inject` with JSON `{"token", "user", "rawMime"}` — checks the
+  token (constant-time compare) and that `user` is on the allowlist, then
+  pipes the raw message to sendmail, which hands it to Postfix and
+  Postfix delivers it to Dovecot exactly like a message that arrived
+  directly. Every original header survives; the only header added is the
+  usual `Received:` line Postfix adds to everything, and the envelope
+  sender is set to the original `From:` address.
+
+Nothing is ever logged except one line per request (user, size, result).
+The token and message contents never touch the log.
+
+## Install (docker host, 192.168.8.100)
+
+Run these on the docker host itself (Proxmox console), not over ssh from
+elsewhere. All paths below are on that host.
+
+```sh
+# 1. Put the files in place
+mkdir -p /opt/mail-inject
+# copy mail-inject.py here (see step 2 for how the files get onto the host)
+cp mail-inject.py /opt/mail-inject/
+cp mail-inject.service /etc/systemd/system/
+
+# 2. Find the Postfix (mta) container name — needed only if the host has
+#    no /usr/sbin/sendmail of its own (check first: ls /usr/sbin/sendmail)
+docker ps --format '{{.Names}} {{.Image}}' | grep -i -E 'postfix|mta|mail'
+
+# 3. Create the env file (use your real addresses, not the placeholders)
+cat > /opt/mail-inject/mail-inject.env <<'EOF'
+MAIL_INJECT_TOKEN=<paste the token from step 4>
+MAIL_INJECT_USERS=you@bearermail.com,friend@bearermail.com
+MTA_CONTAINER=<container name from step 2, or leave the line out>
+EOF
+chmod 600 /opt/mail-inject/mail-inject.env
+
+# 4. Make the token (run once, keep it secret)
+openssl rand -hex 32
+#    Use the value both here (MAIL_INJECT_TOKEN) and as the sync worker
+#    secret SYNC_TOKEN. The two must be identical.
+
+# 5. Start it
+systemctl daemon-reload
+systemctl enable --now mail-inject
+curl -s http://127.0.0.1:8765/health
+#    Expect: {"status": "ok"}
+journalctl -u mail-inject -f   # one line per request; Ctrl-C to exit
+```
+
+## Expose it through the Cloudflare Tunnel
+
+The sync worker (running on Cloudflare) has to reach this service, so it
+needs a public hostname on the tunnel. Add it in the Cloudflare Zero
+Trust dashboard under the existing tunnel (Access -> Tunnels -> your
+tunnel -> Public Hostname), or in `cloudflared`'s `config.yml`:
+
+- Hostname, e.g. `sync.bearermail.com`
+- Service: `http://localhost:8765` (the docker host's own loopback)
+
+Point the tunnel straight at the service. Do **not** route it through
+FeatherWall — this is a machine-to-machine endpoint, not a user-facing
+app. Test from outside the LAN:
+
+```sh
+curl -s https://sync.bearermail.com/health
+#    Expect: {"status": "ok"}
+```
+
+Then set the same hostname in the sync worker's vars
+(`HOME_HEALTH_URL=https://sync.bearermail.com/health`,
+`HOME_INJECT_URL=https://sync.bearermail.com/inject`).
+
+## Test an injection by hand
+
+```sh
+# Build a tiny test message and inject it as yourself.
+printf 'From: test@example.com\r\nTo: you@bearermail.com\r\nSubject: merge-back test\r\n\r\nhello\r\n' > /tmp/test.eml
+python3 - <<'EOF'
+import json, os, urllib.request
+raw = open('/tmp/test.eml', encoding='utf-8').read()
+req = urllib.request.Request(
+    'https://sync.bearermail.com/inject',
+    data=json.dumps({
+        'token': open('/opt/mail-inject/mail-inject.env').read().split('MAIL_INJECT_TOKEN=')[1].splitlines()[0].strip(),
+        'user': 'you@bearermail.com',
+        'rawMime': raw,
+    }).encode('utf-8'),
+    headers={'Content-Type': 'application/json'},
+)
+print(urllib.request.urlopen(req, timeout=30).read().decode())
+EOF
+# Then check the inbox in plMail: the test message should be there.
+```
+
+## Fallback if sendmail is not available: IMAP APPEND
+
+If neither a host sendmail nor the mta container is reachable, messages
+can be appended straight to a mailbox over IMAP instead. This needs the
+mailbox password (or a Dovecot master user) and the mailstore's IMAP
+address — it is a fallback, not the default path:
+
+```python
+import imaplib
+from email.parser import BytesParser
+from email.policy import default as p
+
+raw = open('/tmp/test.eml', 'rb').read()
+msg = BytesParser(policy=p).parsebytes(raw)
+date = msg['Date']  # keep the original date as the internal date
+
+m = imaplib.IMAP4_SSL('mailstore-host', 993)
+m.login('you@bearermail.com', '<imap password>')
+m.append('INBOX', None, date, raw)
+m.logout()
+```
+
+A host-side alternative that needs no password is Dovecot's own tool,
+run against the mailstore container:
+
+```sh
+docker exec -i <mailstore-container> doveadm save -u you@bearermail.com -m INBOX < /tmp/test.eml
+```
+
+## Notes and limits
+
+- **Fidelity**: the raw message travels as a JSON string, so it is
+  re-encoded as UTF-8 on arrival. Ordinary mail (UTF-8 throughout) is
+  byte-identical. Mail carrying non-UTF-8 8-bit content may be altered
+  in transit; the headers and body text still arrive intact.
+- **Size**: messages over 25 MB are rejected with 413 (`MAX_BYTES`).
+- **Duplicates**: the sync worker records every delivered message id in
+  KV, so a retry never injects the same message twice. If you inject by
+  hand, that protection does not apply.
+- **Security**: localhost-only bind, shared-secret token, fixed user
+  allowlist. The token is the only thing standing between the internet
+  and your inboxes: use a long random value, never reuse a password,
+  and rotate it (change it in both places) if it ever leaks.

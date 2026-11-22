@@ -1,8 +1,15 @@
 import app from '../hono/hono';
 import emailService from '../service/email-service';
+import r2Service from '../service/r2-service';
 import result from '../model/result';
 import userContext from '../security/user-context';
 import attService from '../service/att-service';
+import BizError from '../error/biz-error';
+import { t } from '../i18n/i18n';
+
+// Merge-back: R2 key prefix for the untouched original message bytes.
+// Keep in sync with the same value in email/email.js.
+const RAW_PREFIX = 'raw/';
 
 app.get('/email/list', async (c) => {
 	const data = await emailService.list(c, c.req.query(), userContext.getUserId(c));
@@ -34,3 +41,26 @@ app.put('/email/read', async (c) => {
 	return c.json(result.ok());
 })
 
+// Merge-back: return the untouched original message bytes stored at
+// receive time, as message/rfc822. Own mail only; the admin (env.admin)
+// may fetch any message. Used by the sync worker to push the original
+// home when the home lab comes back.
+app.get('/email/raw', async (c) => {
+	const user = userContext.getUser(c);
+	const emailId = Number(c.req.query().emailId);
+	if (!emailId) {
+		return c.notFound();
+	}
+	const row = await emailService.selectById(c, emailId);
+	if (!row) {
+		return c.notFound();
+	}
+	if (row.userId !== user.userId && user.email !== c.env.admin) {
+		throw new BizError(t('unauthorized'), 403);
+	}
+	const resp = await r2Service.toObjResp(c, RAW_PREFIX + row.emailId + '.eml');
+	if (!resp) {
+		return c.notFound();
+	}
+	return resp;
+})
