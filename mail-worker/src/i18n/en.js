@@ -1,5 +1,6 @@
 const en = {
 	IncorrectPwd: 'Incorrect password',
+	invalidEmailOrPassword: 'Invalid email or password',
 	addAccountDisabled: 'Add Email Address feature is disabled',
 	regDisabled: 'Sign up is disabled',
 	emptyEmail: 'Email cannot be empty',
@@ -38,6 +39,7 @@ const en = {
 	banEmailPrefix: 'Invalid characters in email address',
 	pwdMinLength: 'Password must be at least 6 characters',
 	resetTooMany: 'Too many password reset requests, please try again later',
+	tooManyLoginAttempts: 'Too many login attempts. Please try again later',
 	resetLinkInvalid: 'This reset link is invalid or has expired, please request a new one',
 	notEmailDomain: 'Invalid email domain',
 	emptyRegKey: 'Invite code cannot be empty',
@@ -114,3 +116,4 @@ const en = {
 };
 
 export default en;
+

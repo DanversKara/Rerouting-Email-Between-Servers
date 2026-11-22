@@ -9,6 +9,28 @@ import analysisService from './service/analysis-service';
 import { handleWsUpgrade } from './websocket/connect';
 import proxyService from './service/proxy-service';
 export { MailHub } from './websocket/hub'; // Durable Object 必须从 Worker 入口导出
+// Mail originals live under raw/<emailId>.eml in object storage. Those keys
+// are sequential integers, so anyone could enumerate them — the public
+// object routes must never serve them.
+function isRawMailKey(key) {
+	let decoded = key;
+	try {
+		decoded = decodeURIComponent(key);
+	} catch (e) {
+		// Undecodable key: judge the raw form as-is.
+	}
+	return decoded === 'raw' || decoded.startsWith('raw/');
+}
+
+// Framing protection for responses the Worker serves directly (the SPA
+// itself is covered by mail-vue/public/_headers via Static Assets).
+function withFrameHeaders(resp) {
+	const headers = new Headers(resp.headers);
+	headers.set('X-Frame-Options', 'SAMEORIGIN');
+	headers.set('Content-Security-Policy', "frame-ancestors 'self'");
+	return new Response(resp.body, { status: resp.status, headers });
+}
+
 export default {
 	 async fetch(req, env, ctx) {
 
@@ -32,13 +54,19 @@ export default {
 
 		if (url.pathname.startsWith('/oss/')) {
 			const key = url.pathname.slice('/oss/'.length);
+			// Raw mail originals are private: they are only served through
+			// the authenticated /api/email/raw endpoint. Never serve them
+			// from the public object routes, whatever key is requested.
+			if (isRawMailKey(key)) {
+				return new Response('Not Found', { status: 404 });
+			}
 			const resp = await r2Service.toObjResp({ env }, key);
-			return resp || new Response('Not Found', { status: 404 });
+			return resp ? withFrameHeaders(resp) : new Response('Not Found', { status: 404 });
 		}
 
 		 if (['/static/','/attachments/'].some(p => url.pathname.startsWith(p))) {
 			 const resp = await r2Service.toObjResp({ env }, url.pathname.substring(1));
-			 return resp || new Response('Not Found', { status: 404 });
+			 return resp ? withFrameHeaders(resp) : new Response('Not Found', { status: 404 });
 		 }
 
 		return env.assets.fetch(req);
@@ -58,3 +86,4 @@ export default {
 		await oauthService.clearNoBindOathUser({ env })
 	},
 };
+

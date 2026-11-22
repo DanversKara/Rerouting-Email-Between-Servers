@@ -463,10 +463,15 @@ const dbInit = {
 						notice_title, notice_content, notice_type, notice_duration, notice_offset, notice_position, notice_width, notice, no_recipient,
 						login_domain, bucket, region, endpoint, s3_access_key, s3_secret_key
 					)
-					SELECT 0, 0, 0, 0, 'Cloud Mail', 2, 1, 1,
+					// Fresh installs default to sign-up closed and invite-code
+					// required: open self-registration lets anyone squat an
+					// uncreated address (account pre-hijacking). The admin
+					// creates accounts from Users instead. This only sets the
+					// seed for new databases; live settings are unchanged.
+					SELECT 1, 0, 0, 0, 'Cloud Mail', 2, 1, 1,
 						'{}', 0, 0.90,
 						'', '', 1, '', 1, '', 0,
-						1, 1, 1,
+						0, 1, 1,
 						'Cloud Mail', ?, 'none', 0, 0, 'top-right', 340, 0, 1,
 						0, '', '', '', '', ''
 					WHERE NOT EXISTS (SELECT 1 FROM setting)

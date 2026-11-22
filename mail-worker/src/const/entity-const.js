@@ -156,6 +156,7 @@ export const verifyRecordType = {
 	ADD: 1,
 	LOGIN: 2,
 	RESET: 3,
+	LOGIN_RATE: 4,
 }
 
 
@@ -163,3 +164,4 @@ export const isDel = {
 	DELETE: 1,
 	NORMAL: 0
 }
+

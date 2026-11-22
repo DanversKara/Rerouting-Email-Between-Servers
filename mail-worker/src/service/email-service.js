@@ -577,33 +577,92 @@ const emailService = {
 			deliveries = this.sendResend(c, context);
 		}
 
+		// Atomic quota reservation: the pre-check above is read-then-decide,
+		// so two concurrent sends could both pass it. Reserving here makes
+		// check-and-increment one atomic UPDATE, and the unused part is
+		// released in the finally below once the deliveries finish. It sits
+		// after every validation throw on purpose: a rejected send must
+		// never hold quota. Internal-only sends are not counted (they
+		// never were).
+		let reservedCount = 0;
+		if (c.env.admin !== userRow.email && roleRow.sendCount && roleRow.sendType !== 'internal') {
+			const reserved = await userService.reserveSendCount(c, quotaCount, userId, roleRow.sendCount);
+			if (!reserved) {
+				const freshRow = await userService.selectById(c, userId);
+				if (freshRow.sendCount >= roleRow.sendCount) {
+					if (roleRow.sendType === 'day') throw new BizError(t('daySendLimit'), 403);
+					if (roleRow.sendType === 'count') throw new BizError(t('totalSendLimit'), 403);
+				}
+				if (roleRow.sendType === 'day') throw new BizError(t('daySendLack'), 403);
+				if (roleRow.sendType === 'count') throw new BizError(t('totalSendLack'), 403);
+			}
+			reservedCount = quotaCount;
+		}
+
 		const emailResults = [];
 		let sendError = '';
 
-		// 渠道每完成一组发送并保存记录后返回结果，后续发送失败仍保留已完成部分。
-		for await (const delivery of deliveries) {
-			if (delivery.error) {
-				sendError = delivery.error.message;
-				break;
+		try {
+			// 渠道每完成一组发送并保存记录后返回结果，后续发送失败仍保留已完成部分。
+			for await (const delivery of deliveries) {
+				if (delivery.error) {
+					sendError = delivery.error.message;
+					break;
+				}
+
+				emailResults.push(...delivery.emails);
 			}
 
-			emailResults.push(...delivery.emails);
-		}
+			if (!separate) {
+				if (sendError) throw new BizError(sendError);
+				return emailResults;
+			}
 
-		if (!separate) {
-			if (sendError) throw new BizError(sendError);
-			return emailResults;
+			// 分开发送只返回尚未完成的收件人，供前端保留并重试。
+			const sentRecipients = emailResults.flatMap(item =>
+				JSON.parse(item.recipient).map(recipient => recipient.address)
+			);
+			return {
+				emails: emailResults,
+				failedRecipients: sendParams.receiveEmail.filter(address => !sentRecipients.includes(address)),
+				error: sendError
+			};
+		} finally {
+			// Release whatever part of the reservation was not actually
+			// sent (provider error, or separate mode with failed
+			// recipients). Never releases more than was reserved.
+			await this.releaseUnusedQuota(c, reservedCount, userId, emailResults);
 		}
+	},
 
-		// 分开发送只返回尚未完成的收件人，供前端保留并重试。
-		const sentRecipients = emailResults.flatMap(item =>
-			JSON.parse(item.recipient).map(recipient => recipient.address)
-		);
-		return {
-			emails: emailResults,
-			failedRecipients: sendParams.receiveEmail.filter(address => !sentRecipients.includes(address)),
-			error: sendError
+	// How many recipients a saved send record actually covers.
+	countSentRecipients(emailResult) {
+		const countList = (value) => {
+			try {
+				return JSON.parse(value || '[]').length;
+			} catch (e) {
+				return 0;
+			}
 		};
+		return countList(emailResult.recipient) + countList(emailResult.cc) + countList(emailResult.bcc);
+	},
+
+	// Give back the reserved quota that was not used by this send. A failure
+	// to release only leaves quota reserved (never overshoots), so a release
+	// error is logged and swallowed.
+	async releaseUnusedQuota(c, reservedCount, userId, emailResults) {
+		if (!reservedCount) {
+			return;
+		}
+		try {
+			const sentCount = emailResults.reduce((total, item) => total + this.countSentRecipients(item), 0);
+			const unused = reservedCount - sentCount;
+			if (unused > 0) {
+				await userService.releaseSendCount(c, unused, userId);
+			}
+		} catch (e) {
+			console.error('releaseUnusedQuota failed: ', e);
+		}
 	},
 
 	// 站内发送：普通发送共用一条发件记录，分开发送则每人一条，再写入站内收件箱。
@@ -706,9 +765,9 @@ const emailService = {
 			emailData.relation = messageId;
 		}
 		const deliveredCount = receiveEmail.length + ccEmail.length + bccEmail.length;
-		if (roleRow.sendCount && roleRow.sendType !== 'internal') {
-			await userService.incrUserSendCount(c, deliveredCount, userId);
-		}
+		// No increment here: the quota for this send was already reserved
+		// atomically in send() before the provider call, and the unused
+		// part is released there once the deliveries finish.
 
 		const emailResult = await orm(c).insert(email).values(emailData).returning().get();
 
@@ -1528,3 +1587,4 @@ const emailService = {
 };
 
 export default emailService;
+

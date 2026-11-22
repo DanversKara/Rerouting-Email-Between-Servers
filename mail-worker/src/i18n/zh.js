@@ -1,5 +1,6 @@
 const zh = {
 	IncorrectPwd: '密码输入错误',
+	invalidEmailOrPassword: '邮箱或密码错误',
 	addAccountDisabled: '添加邮箱功能已关闭',
 	regDisabled: '注册功能已关闭',
 	emptyEmail: '邮箱不能为空',
@@ -38,6 +39,7 @@ const zh = {
 	banEmailPrefix: '邮箱名包含非法字符',
 	pwdMinLength: '密码至少六位',
 	resetTooMany: '密码重置请求过于频繁，请稍后再试',
+	tooManyLoginAttempts: '登录尝试次数过多，请稍后再试',
 	resetLinkInvalid: '重置链接无效或已过期，请重新申请',
 	notEmailDomain: '非法邮箱域名',
 	emptyRegKey: '注册码不能为空',
@@ -114,3 +116,4 @@ const zh = {
 }
 
 export default zh
+

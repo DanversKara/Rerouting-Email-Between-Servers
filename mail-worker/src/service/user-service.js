@@ -327,6 +327,27 @@ const userService = {
 		}).where(eq(user.userId, userId)).run();
 	},
 
+	async reserveSendCount(c, quantity, userId, limit) {
+		// Atomic check-and-increment: only one concurrent send can win the
+		// remaining quota. Mirrors regKeyService.consumeCount.
+		const rows = await orm(c).update(user).set({
+			sendCount: sql`${user.sendCount} + ${quantity}`
+		}).where(and(
+			eq(user.userId, userId),
+			sql`${user.sendCount} + ${quantity} <= ${limit}`
+		)).returning({ userId: user.userId });
+		return rows.length > 0;
+	},
+
+	async releaseSendCount(c, quantity, userId) {
+		if (!quantity || quantity <= 0) {
+			return;
+		}
+		await orm(c).update(user).set({
+			sendCount: sql`max(${user.sendCount} - ${quantity}, 0)`
+		}).where(eq(user.userId, userId)).run();
+	},
+
 	async updateAllUserType(c, type, curType) {
 		await orm(c)
 			.update(user)
@@ -449,3 +470,4 @@ const userService = {
 };
 
 export default userService;
+

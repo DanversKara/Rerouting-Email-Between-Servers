@@ -6,6 +6,14 @@ import { cors } from 'hono/cors';
 
 app.use('*', cors());
 
+// Framing protection for every API response (the SPA itself is covered by
+// mail-vue/public/_headers via Static Assets).
+app.use('*', async (c, next) => {
+	await next();
+	c.header('X-Frame-Options', 'SAMEORIGIN');
+	c.header('Content-Security-Policy', "frame-ancestors 'self'");
+});
+
 app.onError((err, c) => {
 	if (err.name === 'BizError') {
 		console.log(err.message);
@@ -33,5 +41,6 @@ app.onError((err, c) => {
 });
 
 export default app;
+
 
 

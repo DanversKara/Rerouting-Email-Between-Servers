@@ -37,6 +37,24 @@ const verifyRecordService = {
 		return updated.results.length > 0;
 	},
 
+	async consumeLoginRateLimit(c, limit) {
+		const ip = reqUtils.getIp(c);
+		const type = verifyRecordType.LOGIN_RATE;
+		const db = c.env.db;
+
+		// Same atomic reserve-and-count as the login limiter, but on its
+		// own counter so it never interferes with the Turnstile gate.
+		const [, updated] = await db.batch([
+			db.prepare(`INSERT INTO verify_record (ip, type, count)
+				SELECT ?, ?, 0 WHERE NOT EXISTS (SELECT 1 FROM verify_record WHERE ip = ? AND type = ?)`)
+				.bind(ip, type, ip, type),
+			db.prepare(`UPDATE verify_record SET count = count + 1, update_time = CURRENT_TIMESTAMP
+				WHERE ip = ? AND type = ? AND count < ? RETURNING vr_id`)
+				.bind(ip, type, limit)
+		]);
+		return updated.results.length > 0;
+	},
+
 	async consumeResetAttempt(c, limit) {
 		const ip = reqUtils.getIp(c);
 		const type = verifyRecordType.RESET;
@@ -127,3 +145,4 @@ const verifyRecordService = {
 };
 
 export default verifyRecordService;
+

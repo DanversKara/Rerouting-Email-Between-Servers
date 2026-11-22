@@ -82,12 +82,12 @@ const loginService = {
 
 		const accountRow = await accountService.selectByEmailIncludeDel(c, email);
 
-		if (accountRow && accountRow.isDel === isDel.DELETE) {
-			throw new BizError(t('isDelUser'));
-		}
-
 		if (accountRow) {
-			throw new BizError(t('isRegAccount'));
+			// Same response as a fresh registration: never reveal whether
+			// the address already has an account (mirrors the
+			// password-reset flow's identical response). No account is
+			// created and no invite code is consumed.
+			return { regVerifyOpen: false };
 		}
 
 		let defType = null
@@ -230,6 +230,15 @@ const loginService = {
 		}
 
 		if (!noVerifyPwd) {
+			// Unconditional per-IP attempt budget (30/day; the record
+			// clears at UTC 0). No Turnstile is involved, so the sync
+			// worker's rare admin logins — it caches its JWT and re-logs
+			// in only on 401 — stay well under the budget. This runs
+			// whatever the Login verification setting is; the Turnstile
+			// gate below is unchanged.
+			if (!await verifyRecordService.consumeLoginRateLimit(c, 30)) {
+				throw new BizError(t('tooManyLoginAttempts'), 429);
+			}
 			const { loginVerify, loginVerifyCount = 1 } = await settingService.query(c);
 			if (loginVerify === settingConst.loginVerify.OPEN ||
 				(loginVerify === settingConst.loginVerify.COUNT && !await verifyRecordService.consumeLoginAttempt(c, loginVerifyCount))) {
@@ -240,19 +249,21 @@ const loginService = {
 		const userRow = await userService.selectByEmailIncludeDel(c, email);
 
 		if (!userRow) {
-			throw new BizError(t('notExistUser'));
+			if (!noVerifyPwd) {
+				// Same-cost dummy check: a missing account costs exactly
+				// one password hash, like a wrong password — no timing
+				// oracle for the attacker.
+				await cryptoUtils.verifyPassword(password, 'invalid', 'invalid');
+			}
+			throw new BizError(t('invalidEmailOrPassword'));
 		}
 
-		if(userRow.isDel === isDel.DELETE) {
-			throw new BizError(t('isDelUser'));
+		if (!noVerifyPwd && !await cryptoUtils.verifyPassword(password, userRow.salt, userRow.password)) {
+			throw new BizError(t('invalidEmailOrPassword'));
 		}
 
-		if(userRow.status === userConst.status.BAN) {
-			throw new BizError(t('isBanUser'));
-		}
-
-		if (!await cryptoUtils.verifyPassword(password, userRow.salt, userRow.password) && !noVerifyPwd) {
-			throw new BizError(t('IncorrectPwd'));
+		if(userRow.isDel === isDel.DELETE || userRow.status === userConst.status.BAN) {
+			throw new BizError(t('invalidEmailOrPassword'));
 		}
 
 		const uuid = uuidv4();
@@ -297,3 +308,4 @@ const loginService = {
 };
 
 export default loginService;
+
