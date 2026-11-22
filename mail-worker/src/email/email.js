@@ -19,11 +19,6 @@ import { notifyMailWs } from '../websocket/notify';
 // Keep in sync with the same value in api/email-api.js.
 const RAW_PREFIX = 'raw/';
 
-// Unknown Inbox: the account that receives mail addressed to nobody.
-// The user creates this account (unknown@bearermail.com) in the admin
-// panel; until it exists, unknown mail follows the old noRecipient path.
-const UNKNOWN_BUCKET_EMAIL = 'unknown@bearermail.com';
-
 export async function email(message, env, ctx) {
 
 	try {
@@ -83,17 +78,17 @@ export async function email(message, env, ctx) {
 		}
 
 		if (!account) {
-			// Unknown Inbox: an address nobody owns goes to the dedicated
-			// bucket account when it exists, so spam and scams stay out of
-			// the real inboxes. A missing bucket (or a lookup failure) falls
+			// Unknown recipients go to the admin's inbox, like home where
+			// the *@bearermail.com catch-all delivers unknowns to support's
+			// mailbox. A missing admin account (or a lookup failure) falls
 			// through to the existing noRecipient behavior below.
 			try {
-				const bucket = await accountService.selectByEmailIncludeDel({ env: env }, UNKNOWN_BUCKET_EMAIL);
-				if (bucket) {
-					account = bucket;
+				const adminAccount = await accountService.selectByEmailIncludeDel({ env: env }, env.admin);
+				if (adminAccount) {
+					account = adminAccount;
 				}
 			} catch (e) {
-				console.error('Unknown Inbox lookup failed：', e);
+				console.error('Admin account lookup failed：', e);
 			}
 		}
 
