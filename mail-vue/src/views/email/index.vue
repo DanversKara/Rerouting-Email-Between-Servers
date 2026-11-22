@@ -8,6 +8,7 @@
                :star-cancel="starCancel"
                :email-read="emailRead"
                :show-unread="true"
+               :show-recipient="isAllMail"
                :highlight-text="emailStore.searchParams.text"
                actionLeft="4px"
                @jump="jumpContent"
@@ -23,7 +24,7 @@ import {useSettingStore} from "@/store/setting.js";
 import emailScroll from "@/components/email-scroll/index.vue"
 import {emailList, emailDelete, emailLatest, emailRead} from "@/request/email.js";
 import {starAdd, starCancel} from "@/request/star.js";
-import {defineOptions, onBeforeUnmount, onMounted, ref, watch} from "vue";
+import {computed, defineOptions, onBeforeUnmount, onMounted, ref, watch} from "vue";
 import {sleep} from "@/utils/time-utils.js";
 import router from "@/router/index.js";
 import {
@@ -39,6 +40,7 @@ const emailStore = useEmailStore();
 const accountStore = useAccountStore();
 const settingStore = useSettingStore();
 const scroll = ref({})
+const isAllMail = computed(() => !!accountStore.currentAccount?.isAllMail)
 const existIds = new Set();
 let pullTimer = null
 
@@ -77,6 +79,7 @@ watch(() => settingStore.settings.autoRefresh, () => {
 })
 
 function onRefreshSuccess() {
+  accountStore.refreshUnreadCounts()
   inboxWs.retryNow()
 }
 

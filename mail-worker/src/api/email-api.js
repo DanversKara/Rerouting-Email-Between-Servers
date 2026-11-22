@@ -21,6 +21,15 @@ app.get('/email/latest', async (c) => {
 	return c.json(result.ok(list));
 });
 
+// Unified inbox: unread counts per account for the caller only, plus the
+// total across all of the caller's accounts. Used for the count badges in
+// the address list. Session-authenticated like /email/list; the counts are
+// always scoped to the caller's own userId, never another user's mail.
+app.get('/email/unreadCounts', async (c) => {
+	const data = await emailService.unreadCounts(c, userContext.getUserId(c));
+	return c.json(result.ok(data));
+});
+
 app.delete('/email/delete', async (c) => {
 	await emailService.delete(c, c.req.query(), userContext.getUserId(c));
 	return c.json(result.ok());

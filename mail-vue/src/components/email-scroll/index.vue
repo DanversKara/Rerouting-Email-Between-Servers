@@ -89,6 +89,7 @@
                           <span v-html="item.subjectHtml"></span>
                         </slot>
                       </span>
+                      <span v-if="showRecipient && item.type === 0" class="recipient" :title="item.toEmail">→ {{ item.toEmail }}</span>
                     </span>
                     <span class="email-content" v-html="item.listHtml"></span>
                   </div>
@@ -239,6 +240,7 @@ import {Icon} from "@iconify/vue";
 import skeletonBlock from "@/components/email-scroll/skeleton/index.vue"
 import {computed, onActivated, reactive, ref, watch, nextTick, onMounted, onUnmounted } from "vue";
 import {useEmailStore} from "@/store/email.js";
+import {useAccountStore} from "@/store/account.js";
 import {useUiStore} from "@/store/ui.js";
 import {useSettingStore} from "@/store/setting.js";
 import {sleep} from "@/utils/time-utils.js"
@@ -296,6 +298,10 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
+  showRecipient: {
+    type: Boolean,
+    default: false
+  },
   highlightText: {
     type: String,
     default: ''
@@ -308,6 +314,7 @@ const {t} = useI18n()
 const settingStore = useSettingStore()
 const uiStore = useUiStore();
 const emailStore = useEmailStore();
+const accountStore = useAccountStore();
 const loading = ref(false);
 const followLoading = ref(false);
 const noLoading = ref(false);
@@ -621,6 +628,7 @@ function localRead(emailIds) {
       emailList[index].checked = false;
     }
   })
+  accountStore.refreshUnreadCounts()
 }
 
 function rightDelete(emailId) {
@@ -638,6 +646,7 @@ function rightDelete(emailId) {
           plain: true
         })
         emailStore.deleteIds = [emailId];
+        accountStore.refreshUnreadCounts()
       })
     })
     return;
@@ -649,6 +658,7 @@ function rightDelete(emailId) {
       plain: true
     })
     emailStore.deleteIds = [emailId];
+    accountStore.refreshUnreadCounts()
   })
 }
 
@@ -695,6 +705,7 @@ function handleDelete() {
         plain: true
       })
       emailStore.deleteIds = emailIds;
+      accountStore.refreshUnreadCounts()
     })
   })
 }
@@ -1263,6 +1274,16 @@ function renderHighlight(value) {
         white-space: nowrap;
         text-overflow: ellipsis;
         min-width: 0;
+      }
+
+      .recipient {
+        flex: 0 0 auto;
+        max-width: 200px;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        font-size: 12px;
+        color: var(--email-scroll-content-color);
       }
 
       .email-content {

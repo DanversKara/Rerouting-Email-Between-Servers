@@ -4,49 +4,28 @@
       <Icon v-perm="'account:add'" class="icon add" icon="ion:add-outline" width="23" height="23" @click="add"/>
       <Icon class="icon refresh" icon="ion:reload" width="18" height="18" @click="refresh"/>
     </div>
+    <!-- Unified inbox: every message across all of the caller's addresses.
+         Not a real account: selecting it shows all mail (allReceive) sent to
+         the primary address's id, so compose still sends from the primary. -->
+    <div class="account-row all-mail-row" :class="isAllMailSelected ? 'row-choose' : ''" @click="selectAllMail">
+      <span class="account-email">{{ $t('allMail') }}</span>
+      <span v-if="accountStore.totalUnread > 0" class="unread-badge">{{ accountStore.totalUnread }}</span>
+    </div>
     <el-scrollbar class="scrollbar" ref="scrollbarRef">
       <div v-infinite-scroll="getAccountList" :infinite-scroll-distance="600" :infinite-scroll-immediate="false">
-        <el-card class="item" :class="itemBg(item.accountId)" v-for="(item, index) in accounts" :key="item.accountId"
-                 @click="changeAccount(item)">
-          <div class="account">
-            {{ item.email }}
-          </div>
-          <div class="opt">
-            <div class="send-email" @click.stop>
-              <Icon @click="setAllReceive(item)" v-if="!item.allReceive" icon="eva:email-fill" width="22" height="22" color="#fccb1a"/>
-              <Icon @click="setAllReceive(item)" v-else icon="flat-color-icons:folder" width="22" height="22" color="#23c4f1" />
-            </div>
-            <div class="settings" @click.stop>
-              <Icon icon="fluent-color:clipboard-24" width="22" height="22" @click.stop="copyAccount(item.email)"/>
-              <Icon icon="fluent:settings-24-filled" width="21" height="21" color="#909399"
-                    v-if="showNullSetting(item)"/>
-              <el-dropdown v-else>
-                <Icon icon="fluent:settings-24-filled" width="21" height="21" color="#909399"/>
-                <template #dropdown>
-                  <el-dropdown-menu>
-                    <el-dropdown-item v-if="hasPerm('email:send')" @click="openSetName(item)">{{ $t('rename') }}</el-dropdown-item>
-                    <el-dropdown-item v-if="item.accountId !== userStore.user.account.accountId" @click="setAsTop(item, index)">{{ $t('pin') }}</el-dropdown-item>
-                    <el-dropdown-item v-if="item.accountId !== userStore.user.account.accountId && hasPerm('account:delete')"
-                                      @click="remove(item)">{{ $t('delete') }}
-                    </el-dropdown-item>
-                  </el-dropdown-menu>
-                </template>
-              </el-dropdown>
-            </div>
-          </div>
-        </el-card>
+        <div class="account-row" :class="itemBg(item.accountId)" v-for="item in accounts" :key="item.accountId"
+             @click="changeAccount(item)">
+          <span class="account-email">{{ item.email }}</span>
+          <span v-if="accountStore.unreadCounts[item.accountId] > 0" class="unread-badge">{{ accountStore.unreadCounts[item.accountId] }}</span>
+        </div>
 
         <!-- Initial Loading Skeleton -->
         <template v-if="loading">
           <el-skeleton v-for="i in skeletonRows" :key="i" animated>
             <template #template>
-              <el-card class="item">
-                <el-skeleton-item variant="p" style="width: 70%; height: 20px; margin-bottom: 25px"/>
-                <div style="display: flex; justify-content: space-between">
-                  <el-skeleton-item variant="text" style="width: 20px"/>
-                  <el-skeleton-item variant="text" style="width: 20px"/>
-                </div>
-              </el-card>
+              <div class="account-row">
+                <el-skeleton-item variant="p" style="width: 70%; height: 20px"/>
+              </div>
             </template>
           </el-skeleton>
         </template>
@@ -55,13 +34,9 @@
         <template v-if="accounts.length > 0 && !noLoading">
           <el-skeleton animated>
             <template #template>
-              <el-card class="item">
-                <el-skeleton-item variant="p" style="width: 70%; height: 20px; margin-bottom: 20px"/>
-                <div style="display: flex; justify-content: space-between">
-                  <el-skeleton-item variant="text" style="width: 20px"/>
-                  <el-skeleton-item variant="text" style="width: 20px"/>
-                </div>
-              </el-card>
+              <div class="account-row">
+                <el-skeleton-item variant="p" style="width: 70%; height: 20px"/>
+              </div>
             </template>
           </el-skeleton>
         </template>
@@ -116,27 +91,14 @@
         <span style="font-size: 12px;color: #F56C6C" v-if="botJsError">{{ $t('verifyModuleFailed', {action: $t('add')}) }}</span>
       </div>
     </el-dialog>
-    <el-dialog v-model="setNameShow" :title="$t('changeUserName')">
-      <div class="container">
-        <el-input v-model="accountName" type="text" :placeholder="$t('username')" autocomplete="off" @keyup.enter="setName">
-        </el-input>
-        <el-button class="btn" type="primary" @click="setName" :loading="setNameLoading"
-        >{{ $t('save') }}
-        </el-button>
-      </div>
-    </el-dialog>
   </div>
 </template>
 <script setup>
 import {Icon} from "@iconify/vue";
-import {computed, nextTick, reactive, ref, watch} from "vue";
+import {computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch} from "vue";
 import {
   accountList,
-  accountAdd,
-  accountDelete,
-  accountSetName,
-  accountSetAllReceive,
-  accountSetAsTop
+  accountAdd
 } from "@/request/account.js";
 import {sleep} from "@/utils/time-utils.js"
 import {isEmail} from "@/utils/verify-utils.js";
@@ -146,7 +108,6 @@ import {useEmailStore} from "@/store/email.js";
 import {useUserStore} from "@/store/user.js";
 import {hasPerm} from "@/perm/perm.js"
 import {useI18n} from "vue-i18n";
-import {AccountAllReceiveEnum} from "@/enums/account-enum.js";
 import {reloadTurnstileScript} from "@/utils/turnstile-script.js";
 
 const {t} = useI18n();
@@ -162,12 +123,8 @@ const noLoading = ref(false)
 const loading = ref(false)
 const followLoading = ref(false);
 const verifyShow = ref(false)
-const setNameShow = ref(false)
-const setNameLoading = ref(false)
-const accountName = ref(null)
 const addRef = ref({})
 const scrollbarRef = ref({})
-let account = null
 let turnstileId = null
 const botJsError = ref(false)
 let verifyToken = ''
@@ -253,95 +210,30 @@ function getSkeletonRows() {
   skeletonRows = accounts.length
 }
 
-function setName() {
-
-  if (setNameLoading.value) return
-
-  let name = accountName.value
-
-  if (name === account.name) {
-    setNameShow.value = false
-    return
-  }
-
-  if (!name) {
-    ElMessage({
-      message: t('emptyUserNameMsg'),
-      type: 'error',
-      plain: true,
-    })
-    return;
-  }
-
-  setNameLoading.value = true
-  accountSetName(account.accountId, name).then(() => {
-    account.name = name
-    setNameShow.value = false
-
-    if (account.accountId === userStore.user.account.accountId) {
-      userStore.user.name = name
-    }
-
-    ElMessage({
-      message: t('saveSuccessMsg'),
-      type: "success",
-      plain: true
-    })
-  }).finally(() => {
-    setNameLoading.value = false
-  })
-}
-
-function openSetName(accountItem) {
-  accountName.value = accountItem.name
-  account = accountItem
-  setNameShow.value = true
-}
-
-function setAllReceive(account) {
-  let allReceiveAccount = accounts.find(account => account.allReceive === AccountAllReceiveEnum.ENABLED);
-  if (allReceiveAccount && allReceiveAccount.accountId !== account.accountId) allReceiveAccount.allReceive = AccountAllReceiveEnum.DISABLED;
-  account.allReceive = account.allReceive === AccountAllReceiveEnum.DISABLED ? AccountAllReceiveEnum.ENABLED : AccountAllReceiveEnum.DISABLED;
-  accountSetAllReceive(account.accountId).catch(() => {
-    account.allReceive = account.allReceive === AccountAllReceiveEnum.DISABLED ? AccountAllReceiveEnum.ENABLED : AccountAllReceiveEnum.DISABLED;
-    if (allReceiveAccount) allReceiveAccount.allReceive = AccountAllReceiveEnum.ENABLED;
-  }).then(() => {
-    changeAccount(account);
-    emailStore.emailScroll?.refreshList();
-    emailStore.sendScroll?.refreshList();
-  })
-}
 
 
-function showNullSetting(item) {
-  return !hasPerm('email:send') && !(item.accountId !== userStore.user.account.accountId && hasPerm('account:delete'))
+
+const isAllMailSelected = computed(() => !!accountStore.currentAccount?.isAllMail)
+
+// Unified inbox: show every message across all of the caller's addresses.
+// Implemented on top of the existing allReceive flag: the list endpoint
+// drops the accountId filter when allReceive is 1 (still scoped to the
+// caller's userId), so this reuses the whole inbox pipeline as-is. The
+// anchor is the first (primary) account, so compose still sends from it.
+function selectAllMail() {
+  const anchor = accounts[0]
+  if (!anchor) return
+  if (isAllMailSelected.value) return
+  accountStore.currentAccountId = anchor.accountId
+  accountStore.currentAccount = {...anchor, allReceive: 1, isAllMail: true}
+  emailStore.emailScroll?.refreshList()
+  emailStore.sendScroll?.refreshList()
+  accountStore.refreshUnreadCounts()
 }
 
 function itemBg(accountId) {
-  return accountStore.currentAccountId === accountId ? 'item-choose' : ''
-}
-
-
-
-function remove(account) {
-  ElMessageBox.confirm(t('delConfirm', {msg: account.email}), {
-    confirmButtonText: t('confirm'),
-    cancelButtonText: t('cancel'),
-    type: 'warning'
-  }).then(() => {
-    accountDelete(account.accountId).then(() => {
-      const index = accounts.findIndex(item => item.accountId === account.accountId);
-      accounts.splice(index, 1);
-      if (accounts.length < queryParams.size) {
-        getAccountList()
-      }
-      ElMessage({
-        message: t('delSuccessMsg'),
-        type: 'success',
-        plain: true,
-      })
-    })
-  });
+  if (accountStore.currentAccount?.isAllMail) return ''
+  return accountStore.currentAccountId === accountId ? 'row-choose' : ''
 }
 
 function refresh() {
@@ -357,11 +249,20 @@ function refresh() {
   scrollbarRef.value.setScrollTop(0)
   accounts.splice(0, accounts.length)
   getAccountList()
+  accountStore.refreshUnreadCounts()
 }
 
 function changeAccount(account) {
+  // Same-id switch (e.g. primary -> All mail) does not fire the
+  // currentAccountId watcher, so refresh the lists explicitly.
+  const changed = accountStore.currentAccountId !== account.accountId || accountStore.currentAccount?.isAllMail
   accountStore.currentAccountId = account.accountId
   accountStore.currentAccount = account
+  if (changed) {
+    emailStore.emailScroll?.refreshList()
+    emailStore.sendScroll?.refreshList()
+  }
+  accountStore.refreshUnreadCounts()
 }
 
 function add() {
@@ -370,38 +271,6 @@ function add() {
   setTimeout(() => {
     addRef.value.focus()
   }, 100)
-}
-
-function setAsTop(account, index) {
-  accountSetAsTop(account.accountId).then(() => {
-    ElMessage({
-      message: t('setSuccess'),
-      type: 'success',
-      plain: true,
-    })
-
-    const [item] = accounts.splice(index, 1);
-    accounts.splice(1, 0, item);
-
-  });
-}
-
-async function copyAccount(account) {
-  try {
-    await navigator.clipboard.writeText(account);
-    ElMessage({
-      message: t('copySuccessMsg'),
-      type: 'success',
-      plain: true,
-    })
-  } catch (err) {
-    console.error(`${t('copyFailMsg')}:`, err);
-    ElMessage({
-      message: t('copyFailMsg'),
-      type: 'error',
-      plain: true,
-    })
-  }
 }
 
 function getAccountList() {
@@ -438,13 +307,33 @@ function getAccountList() {
 
     loading.value = false
     followLoading.value = false
-    first = false
+    if (first) {
+      first = false
+      selectAllMail()
+    }
+    accountStore.refreshUnreadCounts()
   }).catch(() => {
     loading.value = false
     followLoading.value = false
   })
 }
 
+
+let unreadTimer = null
+
+onMounted(() => {
+  accountStore.refreshUnreadCounts()
+  unreadTimer = window.setInterval(() => {
+    accountStore.refreshUnreadCounts()
+  }, 30000)
+})
+
+onBeforeUnmount(() => {
+  if (unreadTimer) {
+    window.clearInterval(unreadTimer)
+    unreadTimer = null
+  }
+})
 
 function submit() {
 
@@ -537,11 +426,6 @@ function submit() {
   })
 }
 </script>
-<style>
-path[fill="#ffdda1"] {
-  fill: #ffdd7d;
-}
-</style>
 <style scoped lang="scss">
 .account-box {
 
@@ -577,10 +461,10 @@ path[fill="#ffdda1"] {
 
   .scrollbar {
     width: 100%;
-    height: calc(100% - 38px);
+    height: calc(100% - 77px);
     overflow: auto;
     @media (max-width: 767px) {
-      height: calc(100% - 98px);
+      height: calc(100% - 137px);
     }
 
     .empty {
@@ -604,52 +488,49 @@ path[fill="#ffdda1"] {
     margin-top: 15px;
   }
 
-  .item {
-    background-color: var(--el-bg-color);
-    border-radius: 8px;
-    padding: 10px;
-    margin-bottom: 11px;
-    margin-left: 10px;
-    margin-right: 10px;
+  .account-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 12px;
     cursor: pointer;
 
-    .account {
-      font-weight: 400;
-      font-size: 15px;
-      margin-bottom: 20px;
+    .account-email {
       overflow: hidden;
       white-space: nowrap;
       text-overflow: ellipsis;
+      font-size: 14px;
+      min-width: 0;
     }
 
-    .opt {
-      display: flex;
-      justify-content: space-between;
+    .unread-badge {
+      flex: 0 0 auto;
+      min-width: 20px;
+      height: 20px;
+      padding: 0 6px;
+      border-radius: 10px;
+      background: var(--el-color-primary);
+      color: #fff;
       font-size: 12px;
-      color: #888;
-
-      .settings {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-
-      .send-email {
-        display: flex;
-        align-items: center;
-      }
+      line-height: 20px;
+      text-align: center;
     }
 
-    :deep(.el-card__body) {
-      padding: 0;
+    &:hover {
+      background: var(--email-hover-background);
     }
   }
 
-  .item:first-child {
-    margin-top: 10px;
+  .all-mail-row {
+    border-bottom: 1px solid var(--el-border-color);
+
+    .account-email {
+      font-weight: 600;
+    }
   }
 
-  .item-choose {
+  .row-choose {
     background: var(--choose-account-background);
   }
 }

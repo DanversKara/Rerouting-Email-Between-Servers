@@ -179,6 +179,39 @@ const emailService = {
 		return { list, total: totalRow.total, latestEmail };
 	},
 
+	// Unread counts per account for the caller's own mail only (inbox scope:
+	// received, not deleted, unread). Mirrors the filters emailListFilters
+	// applies to the inbox list, so a badge count of N means N unread rows
+	// will actually show in that address's inbox.
+	async unreadCounts(c, userId) {
+
+		const rows = await orm(c).select({
+			accountId: email.accountId,
+			unread: count()
+		}).from(email)
+			.innerJoin(
+				account,
+				eq(account.accountId, email.accountId)
+			)
+			.where(and(
+				eq(email.userId, userId),
+				eq(email.type, emailConst.type.RECEIVE),
+				eq(email.isDel, isDel.NORMAL),
+				eq(account.isDel, isDel.NORMAL),
+				eq(email.unread, emailConst.unread.UNREAD)
+			))
+			.groupBy(email.accountId)
+			.all();
+
+		const counts = {};
+		let total = 0;
+		for (const row of rows) {
+			counts[row.accountId] = row.unread;
+			total += row.unread;
+		}
+		return { counts, total };
+	},
+
 	toListText(item) {
 		const raw = emailUtils.formatText(item.text) || emailUtils.htmlToText(item.content);
 		return raw.replace(/\s+/g, ' ').trim().slice(0, EMAIL_LIST_TEXT_LEN);
