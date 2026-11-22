@@ -35,8 +35,37 @@ Cloud Mail copies are **not** deleted after sync. That stays your call.
 ## Deploy
 
 This worker is **not** deployed by `.github/workflows/deploy-cloudflare.yml`
-(that workflow only covers `mail-worker/` and `mail-vue/`). Deploy it by
-hand from this directory:
+(that workflow only covers `mail-worker/` and `mail-vue/`).
+
+### Option A — GitHub Actions (recommended)
+
+`.github/workflows/deploy-sync-worker.yml` deploys it. Manual run:
+Actions → "Deploy cloud-mail sync worker" → Run workflow. It uses the
+same `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` secrets as the
+main deploy, finds or creates the `SYNC_KV` namespace (or uses
+`SYNC_KV_ID` if you set it), fills in the vars, deploys, then sets the
+worker secrets. Nothing secret is committed.
+
+Add these first (repo Settings → Secrets and variables → Actions).
+Secrets — values stay hidden:
+
+| Secret | Value |
+| --- | --- |
+| `CLOUDMAIL_ADMIN_EMAIL` | `support@bearermail.com` (the Cloud Mail admin login) |
+| `CLOUDMAIL_ADMIN_PASSWORD` | the Cloud Mail admin password |
+| `SYNC_TOKEN` | same value as `MAIL_INJECT_TOKEN` in `../home-inject/mail-inject.env` |
+
+Variables — plain values (a secret works too, the workflow accepts either):
+
+| Variable | Value |
+| --- | --- |
+| `CLOUDMAIL_URL` | `https://backup.bearermail.com` (no trailing slash) |
+| `HOME_HEALTH_URL` | `https://sync.bearermail.com/health` |
+| `HOME_INJECT_URL` | `https://sync.bearermail.com/inject` |
+| `USER_MAP` | JSON, e.g. `{"1": "support@bearermail.com", "2": "jett@bearermail.com"}` — find the user ids in Cloud Mail under Admin → Users |
+| `SYNC_KV_ID` | (optional) id of an existing `SYNC_KV` namespace; the workflow creates one if this is unset |
+
+### Option B — by hand from this directory:
 
 ```sh
 cd sync-worker
@@ -95,3 +124,4 @@ npx wrangler deploy
   and hit `/sync` while home is up. Messages already marked
   `synced:<id>` are still skipped; delete a `synced:<id>` key to
   re-deliver that one message.
+

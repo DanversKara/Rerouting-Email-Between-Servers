@@ -7,7 +7,10 @@ crons = ["*/5 * * * *"]
 
 [[kv_namespaces]]
 binding = "SYNC_KV"
-id = "" # create with: wrangler kv namespace create SYNC_KV
+id = "" # Local deploy: put the namespace id here
+#   (create with: wrangler kv namespace create SYNC_KV).
+# GitHub Actions deploy: leave empty, the workflow fills it in
+#   from the SYNC_KV_ID repo secret/variable or creates one.
 
 [vars]
 # Public URL of the deployed Cloud Mail app, no trailing slash.
@@ -21,3 +24,4 @@ HOME_INJECT_URL = ""
 # Example: {"1": "you@bearermail.com", "2": "friend@bearermail.com"}
 # Find the userIds in Cloud Mail under Admin -> Users.
 USER_MAP = ""
+
