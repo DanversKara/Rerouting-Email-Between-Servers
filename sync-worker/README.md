@@ -7,28 +7,39 @@ Mailjet relay, no per-message forwarding.
 
 ## How it works
 
-Every 5 minutes (cron) the worker fetches the home health URL:
-
-- **Home down** (connection refused / timeout / non-2xx): records the
-  outage start time in KV and does nothing else. Server-down and
-  internet-down look identical from out here, and both are handled.
-- **Home up, no outage recorded**: nothing to do.
-- **Home up after an outage**: lists every received message in the outage
-  window via the admin `/api/allEmail/list` endpoint, fetches each
-  original via the new `/api/email/raw` endpoint, and POSTs it to the home
-  injection endpoint (see `../home-inject/`). Each delivered message id is
-  recorded in KV for 30 days, so a crash mid-sync can never deliver the
-  same message twice. The outage window only closes once every listed
-  message was synced or deliberately skipped; failures are retried on the
-  next run.
+Every 5 minutes (cron) — and on a manual `GET /sync` — the worker
+checks the home health URL, then, while home is up, lists every received
+message newer than the last one it processed via the admin
+`/api/allEmail/list` endpoint, fetches each original via the
+`/api/email/raw` endpoint, and POSTs it to the home injection endpoint
+(see `../home-inject/`). Each delivered message id is recorded in KV for
+30 days, so a crash mid-sync can never deliver the same message twice.
+Failures stop that run at the failed message and are retried on the next
+run. Server-down and internet-down look identical from out here, and both
+are handled: while home is down nothing advances and the outage start
+time is recorded in KV for observability only.
 
 Messages skipped on purpose (logged, not errors):
 
-- `userId 0` — mail for an unknown recipient, stored with no owner. There
-  is no home mailbox to deliver it to.
+- `userId 0` — mail for an unknown recipient that the worker could not
+  place (the noRecipient OPEN limbo case). Unknown mail normally routes
+  to the admin inbox now and syncs home like admin mail.
 - No `USER_MAP` entry for the message's Cloud Mail user id.
 - No stored original (message arrived before the raw-mail patch was
   deployed). The Cloud Mail copy is kept.
+
+## Alias sync
+
+Home is the source of truth for aliases. At most once every 3 hours
+(`last_alias_sync` in KV), the worker asks the home injection service
+for each user's current aliases (`GET /aliases`, derived from
+`HOME_INJECT_URL` by swapping `/inject` for `/aliases`) and adds any
+missing ones to the owning Cloud Mail user via the admin-only
+`POST /account/addForUser` endpoint. **Add-only**: addresses are never
+removed. If home is down or the fetch fails, the alias sync is skipped
+for that run and the last-known list stays in place; the mail sync is
+never blocked or failed by it. The run summary carries an `aliasSync`
+field (`{status, added, alreadyHad, failed, users}`).
 
 Cloud Mail copies are **not** deleted after sync. That stays your call.
 
@@ -115,13 +126,17 @@ npx wrangler deploy
 
 - `GET https://<worker>/` returns a one-line status (worker is up).
 - `GET https://<worker>/sync` runs one sync pass immediately and returns
-  the summary as JSON (`{home, outageSince, listed, synced, skipped,
-  failed}`), so you can force a pass without waiting for the cron.
+  the summary as JSON (`{home, lastEmailId, listed, synced, skipped,
+  failed, aliasSync}`), so you can force a pass without waiting for the
+  cron.
 - `npx wrangler tail` shows live logs, including per-message skip/fail
-  reasons.
-- To re-run a past outage window by hand: delete the `home_down_since`
-  key (`npx wrangler kv key delete --binding SYNC_KV home_down_since`)
-  and hit `/sync` while home is up. Messages already marked
-  `synced:<id>` are still skipped; delete a `synced:<id>` key to
-  re-deliver that one message.
+  reasons and alias-sync results.
+- To force an alias sync by hand: delete the `last_alias_sync` key
+  (`npx wrangler kv key delete --binding SYNC_KV last_alias_sync`) and
+  hit `/sync` while home is up. The summary's `aliasSync` field shows
+  what was added.
+- To re-deliver a message by hand: delete its `synced:<id>` key and hit
+  `/sync` while home is up (the cursor does not move backwards, so this
+  only works for a message above the cursor — use a fresh test mail
+  instead when in doubt).
 

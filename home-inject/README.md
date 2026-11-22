@@ -16,6 +16,17 @@ existing Cloudflare Tunnel — never directly.
   directly. Every original header survives; the only header added is the
   usual `Received:` line Postfix adds to everything, and the envelope
   sender is set to the original `From:` address.
+- `GET /aliases` — every account's live aliases from plMail, keyed by the
+  allowlist mailbox address, e.g.
+  `{"support@bearermail.com": ["walmart@bearermail.com", ...]}`. Same
+  token, sent as `Authorization: Bearer <token>`. The sync worker asks
+  for this every few hours so the backup knows where alias mail belongs.
+  Only non-inactive aliases are listed, and never the mailbox address
+  itself. Read path: `docker exec` into the plMail database container
+  and one `psql` query over the `email_alias` table — local socket
+  connections there are trust auth, so no DB password is needed. If the
+  database cannot be read it answers 503 and the worker keeps the
+  last-known list.
 
 Nothing is ever logged except one line per request (user, size, result).
 The token and message contents never touch the log.
@@ -41,6 +52,11 @@ cat > /opt/mail-inject/mail-inject.env <<'EOF'
 MAIL_INJECT_TOKEN=<paste the token from step 4>
 MAIL_INJECT_USERS=you@bearermail.com,friend@bearermail.com
 MTA_CONTAINER=<container name from step 2, or leave the line out>
+# /aliases only — defaults are usually right; set these only if your
+# plMail database container, user or database name differ:
+# PLMAIL_DB_CONTAINER=plmail-mail-server-database-1
+# PLMAIL_DB_USER=app
+# PLMAIL_DB_NAME=app
 EOF
 chmod 600 /opt/mail-inject/mail-inject.env
 
@@ -55,6 +71,14 @@ systemctl enable --now mail-inject
 curl -s http://127.0.0.1:8765/health
 #    Expect: {"status": "ok"}
 journalctl -u mail-inject -f   # one line per request; Ctrl-C to exit
+```
+
+## Test the aliases endpoint
+
+```sh
+TOKEN=$(grep '^MAIL_INJECT_TOKEN=' /opt/mail-inject/mail-inject.env | cut -d= -f2-)
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8765/aliases
+#    Expect: {"you@bearermail.com": ["alias@bearermail.com", ...], ...}
 ```
 
 ## Expose it through the Cloudflare Tunnel

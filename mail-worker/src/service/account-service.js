@@ -107,6 +107,43 @@ const accountService = {
 		return accountRow;
 	},
 
+	// Admin-only: add an address to ANOTHER user's account. Stock Cloud Mail
+	// has no such call — POST /account/add always adds to the caller's own
+	// account — so the alias sync (which runs as the admin) needs this one.
+	// Same safety checks as add(), minus the self-service gates (Turnstile,
+	// per-role account cap, addEmail/manyEmail settings): home is the source
+	// of truth for aliases, and the admin caller is exempt from those in
+	// add() too. Idempotent: an address that already exists (any state) is
+	// left alone and returned, so a retry never duplicates or resurrects.
+	async addForUser(c, params, callerUserId) {
+		const caller = await userService.selectById(c, callerUserId);
+		if (!caller || caller.email !== c.env.admin) {
+			throw new BizError(t('notAdmin'), 403);
+		}
+
+		let { userId, email } = params;
+		userId = Number(userId);
+
+		if (!userId || !email || !verifyUtils.isEmail(email)) {
+			throw new BizError(t('notEmail'));
+		}
+		if (!c.env.domain.includes(emailUtils.getDomain(email))) {
+			throw new BizError(t('notExistDomain'));
+		}
+
+		const target = await userService.selectById(c, userId);
+		if (!target) {
+			throw new BizError(t('notExistUser'));
+		}
+
+		const existing = await this.selectByEmailIncludeDel(c, email);
+		if (existing) {
+			return existing; // already registered; add-only means leave it alone
+		}
+
+		return orm(c).insert(account).values({ email: email, userId: userId, name: emailUtils.getName(email) }).returning().get();
+	},
+
 	selectByEmailIncludeDel(c, email) {
 		return orm(c).select().from(account).where(sql`${account.email} COLLATE NOCASE = ${email}`).get();
 	},

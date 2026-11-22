@@ -8,6 +8,11 @@ ordinary mail.
 
   POST /inject   {"token": ..., "user": ..., "rawMime": ...}
   GET  /health  200 only when an injection path is available
+  GET  /aliases  {"support@example.com": ["alias@example.com", ...], ...}
+                every account's live aliases from plMail, keyed by the
+                allowlist mailbox address. Same token, sent as
+                `Authorization: Bearer <token>`. The backup asks for this
+                every few hours so it knows where alias mail belongs.
 
 Injection is done with the local sendmail (preferred): the raw message is
 piped to sendmail unchanged, so every original header survives and Postfix
@@ -29,6 +34,10 @@ Configuration (environment, see mail-inject.env):
   BIND_HOST          default 127.0.0.1 (do not expose this publicly).
   BIND_PORT          default 8765.
   MAX_BYTES          default 26214400 (25 MB). Larger messages get a 413.
+  PLMAIL_DB_CONTAINER  plMail database container, default
+                     plmail-mail-server-database-1. Used only by /aliases.
+  PLMAIL_DB_USER     database user, default app. Used only by /aliases.
+  PLMAIL_DB_NAME     database name, default app. Used only by /aliases.
 
 The service never logs the token or any message content: one log line per
 request with the user, size and result only.
@@ -44,12 +53,16 @@ import sys
 from email.parser import BytesParser
 from email.policy import default as default_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 BIND_HOST = os.environ.get("BIND_HOST", "127.0.0.1")
 BIND_PORT = int(os.environ.get("BIND_PORT", "8765"))
 SENDMAIL_BIN = os.environ.get("SENDMAIL_BIN", "/usr/sbin/sendmail")
 MTA_CONTAINER = os.environ.get("MTA_CONTAINER", "").strip()
 MAX_BYTES = int(os.environ.get("MAX_BYTES", str(25 * 1024 * 1024)))
+PLMAIL_DB_CONTAINER = os.environ.get("PLMAIL_DB_CONTAINER", "plmail-mail-server-database-1")
+PLMAIL_DB_USER = os.environ.get("PLMAIL_DB_USER", "app")
+PLMAIL_DB_NAME = os.environ.get("PLMAIL_DB_NAME", "app")
 
 TOKEN = os.environ.get("MAIL_INJECT_TOKEN", "")
 USERS = {
@@ -117,6 +130,57 @@ def inject(user, raw_bytes):
     return True, "ok"
 
 
+# One query for every account's live aliases. The account table is
+# "account" (Doctrine default); email_alias carries the addresses with a
+# status of primary / active / inactive. Only non-inactive aliases count
+# for ownership (EmailAliasStatus::countsForOwnership), so those are the
+# ones returned. No address from the request ever reaches this SQL: the
+# query lists everything and the allowlist filter runs in Python.
+ALIASES_SQL = (
+    'SELECT a.email, ea.address FROM "account" a '
+    "JOIN email_alias ea ON ea.account_id = a.id "
+    "WHERE ea.status <> 'inactive' ORDER BY a.email, ea.address"
+)
+
+
+def fetch_aliases():
+    """Read every account's live aliases from plMail's Postgres.
+
+    Returns (ok, result): on success result is {mailbox: [alias, ...]}
+    keyed by the allowlist mailbox addresses; on failure result is a
+    short detail string. The read runs `psql` inside the plMail database
+    container: local Unix-socket connections there are trust auth, so no
+    DB password is needed. Only the allowlist mailboxes are returned.
+    """
+    if not shutil.which("docker"):
+        return False, "docker not available"
+    cmd = [
+        "docker", "exec", PLMAIL_DB_CONTAINER,
+        "psql", "-U", PLMAIL_DB_USER, "-d", PLMAIL_DB_NAME,
+        "-At", "-F", "\t", "-c", ALIASES_SQL,
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=30)
+    except subprocess.TimeoutExpired:
+        return False, "psql timed out"
+    except Exception as e:  # noqa: BLE001 - report anything, never crash the handler
+        return False, "docker exec error: %s" % (e,)
+    if proc.returncode != 0:
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip()[:300]
+        return False, "psql exited %d: %s" % (proc.returncode, err)
+    out = proc.stdout.decode("utf-8", "replace")
+    result = {u: [] for u in sorted(USERS)}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) != 2:
+            continue
+        mailbox, alias = parts[0].strip().lower(), parts[1].strip().lower()
+        if mailbox in result and alias and alias != mailbox:
+            if alias not in result[mailbox]:
+                result[mailbox].append(alias)
+    return True, result
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -128,12 +192,33 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _auth_token(self):
+        auth = self.headers.get("Authorization") or ""
+        if auth.startswith("Bearer "):
+            return auth[len("Bearer "):].strip()
+        return ""
+
     def do_GET(self):
-        if self.path == "/health":
+        path = urlsplit(self.path).path
+        if path == "/health":
             if sendmail_available():
                 self._json(200, {"status": "ok"})
             else:
                 self._json(503, {"status": "unavailable", "detail": "no sendmail available"})
+            return
+        if path == "/aliases":
+            if not hmac.compare_digest(self._auth_token(), TOKEN):
+                log("aliases: rejected bad token")
+                self._json(403, {"status": "error", "detail": "bad token"})
+                return
+            ok, result = fetch_aliases()
+            if ok:
+                total = sum(len(v) for v in result.values())
+                log("aliases: ok mailboxes=%d aliases=%d" % (len(result), total))
+                self._json(200, result)
+            else:
+                log("aliases: FAILED %s" % result)
+                self._json(503, {"status": "error", "detail": result})
             return
         self._json(404, {"status": "not found"})
 

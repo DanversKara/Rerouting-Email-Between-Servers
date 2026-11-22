@@ -13,9 +13,16 @@
 // is local (sendmail) on the home host, so there is no per-message cap to
 // burn through.
 //
+// Every run also refreshes the alias sync when it is due (see
+// maybeSyncAliases): home is the source of truth for aliases, and the
+// backup asks it for each user's current list so alias mail lands in
+// its owning user's inbox. Add-only — addresses are never removed.
+//
 // State lives in the SYNC_KV namespace:
 //   last_email_id    highest emailId fully processed (synced or deliberately
 //                    skipped); the next run starts just above it
+//   last_alias_sync  epoch ms of the last successful alias sync; the
+//                    alias sync runs when this is missing or over 3h old
 //   home_down_since  ISO timestamp of when home was last noticed down
 //                    (observability only — it never gates syncing)
 //   cloudmail_token  cached admin JWT for the Cloud Mail API
@@ -27,6 +34,8 @@
 
 const KV_DOWN_SINCE = 'home_down_since';
 const KV_LAST_ID = 'last_email_id';
+const KV_ALIAS_SYNC = 'last_alias_sync';
+const ALIAS_SYNC_INTERVAL_MS = 3 * 60 * 60 * 1000; // 3 hours
 const KV_TOKEN = 'cloudmail_token';
 const SYNCED_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const MAX_PER_RUN = 200; // messages moved per cron run; the rest wait for the next run
@@ -73,10 +82,20 @@ async function runSync(env) {
 		// Home is up: a stale down marker, if any, is no longer meaningful.
 		await env.SYNC_KV.delete(KV_DOWN_SINCE);
 
+		const userMap = parseUserMap(env.USER_MAP);
+
+		// Alias sync (at most once every 3 hours, add-only). It never
+		// blocks or fails the mail sync: any failure here is logged and
+		// the mail sync below runs exactly as before.
+		try {
+			summary.aliasSync = await maybeSyncAliases(env, userMap);
+		} catch (e) {
+			console.error('alias sync failed (mail sync continues):', e);
+			summary.aliasSync = { status: 'error', detail: String(e && e.message ? e.message : e) };
+		}
+
 		const rows = await listMailSince(env, cursor);
 		summary.listed = rows.length;
-
-		const userMap = parseUserMap(env.USER_MAP);
 		let failed = 0;
 
 		for (const row of rows) {
@@ -228,6 +247,147 @@ async function listMailSince(env, cursor) {
 		}
 	}
 	return rows;
+}
+
+
+// Home aliases endpoint, derived from the inject URL:
+// https://sync.bearermail.com/inject -> https://sync.bearermail.com/aliases
+// (one fewer secret to keep in step; the inject URL always ends in /inject).
+function aliasesUrl(env) {
+	const injectUrl = (env.HOME_INJECT_URL || '').replace(/\/+$/, '');
+	if (!injectUrl.endsWith('/inject')) {
+		return null;
+	}
+	return injectUrl.slice(0, -'/inject'.length) + '/aliases';
+}
+
+// Sync home aliases into Cloud Mail, at most once every 3 hours.
+// Add-only: addresses are added to their owning user when missing and
+// never removed. A failed fetch or a failed add never clears anything:
+// the timestamp only advances when nothing failed, so the next run
+// retries what is still missing. Returns a small status object for the
+// run summary.
+async function maybeSyncAliases(env, userMap) {
+	const lastRaw = await env.SYNC_KV.get(KV_ALIAS_SYNC);
+	const last = Number(lastRaw || '0') || 0;
+	if (last && Date.now() - last < ALIAS_SYNC_INTERVAL_MS) {
+		return { status: 'skipped', reason: 'synced within the last 3h' };
+	}
+
+	const url = aliasesUrl(env);
+	if (!url) {
+		console.error('alias sync skipped: HOME_INJECT_URL does not end in /inject, cannot derive the aliases URL');
+		return { status: 'error', detail: 'cannot derive aliases URL from HOME_INJECT_URL' };
+	}
+
+	let res;
+	try {
+		res = await fetch(url, {
+			method: 'GET',
+			headers: { Authorization: `Bearer ${env.SYNC_TOKEN}` },
+			signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+		});
+	} catch (e) {
+		console.error('alias sync skipped: aliases fetch failed:', e);
+		return { status: 'error', detail: 'aliases fetch failed' };
+	}
+	if (!res.ok) {
+		console.error(`alias sync skipped: aliases endpoint HTTP ${res.status}`);
+		return { status: 'error', detail: `aliases endpoint HTTP ${res.status}` };
+	}
+	const data = await res.json().catch(() => null);
+	if (!data || typeof data !== 'object' || Array.isArray(data)) {
+		console.error('alias sync skipped: aliases endpoint returned invalid JSON');
+		return { status: 'error', detail: 'invalid aliases response' };
+	}
+
+	// Invert USER_MAP (Cloud Mail userId -> home address) so each home
+	// mailbox maps back to its Cloud Mail user.
+	const homeToUser = {};
+	for (const [userId, homeAddress] of Object.entries(userMap)) {
+		if (typeof homeAddress === 'string' && homeAddress) {
+			homeToUser[homeAddress.toLowerCase()] = userId;
+		}
+	}
+
+	let added = 0;
+	let alreadyHad = 0;
+	let failed = 0;
+	const usersSeen = new Set();
+
+	for (const [mailbox, aliases] of Object.entries(data)) {
+		if (!Array.isArray(aliases)) {
+			continue;
+		}
+		const userId = homeToUser[String(mailbox).toLowerCase()];
+		if (!userId) {
+			console.log(`alias sync: no USER_MAP entry for home mailbox ${mailbox}, skipping its aliases`);
+			continue;
+		}
+		// Current addresses for this user. /user/allAccount omits the
+		// primary address, so the mailbox itself is added to the set
+		// explicitly. Paginates: 30 rows a page.
+		const existing = new Set([String(mailbox).toLowerCase()]);
+		let listOk = true;
+		let page = 1;
+		for (;;) {
+			const listRes = await cloudmailFetch(env, `/api/user/allAccount?userId=${encodeURIComponent(userId)}&num=${page}&size=30`, { method: 'GET' });
+			const listBody = await listRes.json().catch(() => null);
+			if (!listRes.ok || !listBody || listBody.code !== 200 || !listBody.data || !Array.isArray(listBody.data.list)) {
+				console.error(`alias sync: could not list addresses for Cloud Mail user ${userId} (HTTP ${listRes.status})`);
+				listOk = false;
+				break;
+			}
+			for (const row of listBody.data.list) {
+				if (row && typeof row.email === 'string') {
+					existing.add(row.email.toLowerCase());
+				}
+			}
+			if (listBody.data.list.length < 30) {
+				break;
+			}
+			page++;
+		}
+		if (!listOk) {
+			// Do not add blind for this user: the existing set may be
+			// incomplete. The next run retries the whole user.
+			failed++;
+			continue;
+		}
+		usersSeen.add(userId);
+
+		for (const alias of aliases) {
+			if (typeof alias !== 'string' || !alias) {
+				continue;
+			}
+			const address = alias.toLowerCase();
+			if (existing.has(address)) {
+				alreadyHad++;
+				continue;
+			}
+			const addRes = await cloudmailFetch(env, '/api/account/addForUser', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({ userId: Number(userId), email: address }),
+			});
+			if (addRes.ok) {
+				existing.add(address);
+				added++;
+			} else {
+				console.error(`alias sync: add ${address} to Cloud Mail user ${userId} failed (HTTP ${addRes.status})`);
+				failed++;
+			}
+		}
+	}
+
+	// Only advance the timestamp when nothing failed, so a failed add is
+	// retried on the next run instead of waiting 3 hours. Successful adds
+	// are already in the user's address set, so the retry only re-tries
+	// what is still missing.
+	if (failed === 0) {
+		await env.SYNC_KV.put(KV_ALIAS_SYNC, String(Date.now()));
+	}
+	return { status: failed === 0 ? 'ok' : 'partial', added, alreadyHad, failed, users: usersSeen.size };
 }
 
 // Move one message home. Returns 'synced', 'skipped' or 'failed'.
