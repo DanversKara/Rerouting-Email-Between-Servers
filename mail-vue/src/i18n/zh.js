@@ -169,6 +169,9 @@ const zh = {
     resetSuccessMsg: '密码已重置，可以用新密码登录。',
     resetLinkInvalid: '重置链接无效或已过期，请重新申请。',
     backToLogin: '返回登录',
+    bindEmailTitle: '注册邮箱',
+    bindEmailBtn: '绑定',
+    bindEmailMsg: '请注册绑定一个邮箱',
     confirmPwd: '确认密码',
     regKeyOptional: '注册码（可选）',
     noAccount: '还没有账号?',
@@ -404,3 +407,4 @@ const zh = {
     notOwner: '基础邮箱不属于您',
 }
 export default zh
+

@@ -169,6 +169,9 @@ const en = {
     resetSuccessMsg: 'Password reset. You can sign in with your new password.',
     resetLinkInvalid: 'This reset link is invalid or has expired. Request a new one.',
     backToLogin: 'Back to sign in',
+    bindEmailTitle: 'Bind an email address',
+    bindEmailBtn: 'Bind',
+    bindEmailMsg: 'Please register and bind an email address',
     confirmPwd: 'Confirm password',
     regKeyOptional: 'Invite code (Optional)',
     noAccount: 'Don\'t have an account? \u200B',
@@ -405,3 +408,4 @@ const en = {
 }
 
 export default en
+

@@ -261,9 +261,7 @@ const dbInit = {
 
 	// 2.0 及之前：最终表结构一次 batch 建好，不再逐步 ALTER
 	async intDB(c) {
-		const noticeContent = 'This project is for learning and communication only. Illegal use is prohibited.<br>Please comply with local laws. The author assumes no legal liability.' +
-			'<br><br>' +
-			'本项目仅供学习交流，禁止用于违法业务。<br>请遵守当地法规，作者不承担任何法律责任。';
+		const noticeContent = 'This project is for learning and communication only. Illegal use is prohibited.<br>Please comply with local laws. The author assumes no legal liability.';
 
 		try {
 			await c.env.db.batch([
@@ -525,7 +523,7 @@ const dbInit = {
 					INSERT INTO role (
 						role_id, name, key, create_time, sort, description, user_id, is_default, send_count, send_type, account_count, avail_domain, ban_email, ban_email_type
 					)
-					SELECT 1, '普通用户', NULL, '0000-00-00 00:00:00', 0, '只有普通使用权限', 0, 1, NULL, 'ban', 10, '', '', 0
+					SELECT 1, 'Regular user', NULL, '0000-00-00 00:00:00', 0, 'Standard user permissions', 0, 1, NULL, 'ban', 10, '', '', 0
 					WHERE NOT EXISTS (SELECT 1 FROM role)
 				`)
 			]);
@@ -535,3 +533,4 @@ const dbInit = {
 	},
 };
 export { dbInit };
+
