@@ -4,6 +4,10 @@ export function login(email, password, token) {
     return http.post('/login', {email, password, token})
 }
 
+export function verifyTotpLogin(challenge, code) {
+    return http.post('/login/totp', {challenge, code})
+}
+
 export function logout() {
     return http.delete('/logout')
 }

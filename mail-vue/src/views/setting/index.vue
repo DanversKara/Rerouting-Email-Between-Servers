@@ -77,6 +77,23 @@
       </div>
       <div class="security-desc">{{$t('disableLinksDesc')}}</div>
     </div>
+    <div class="preference-item">
+      <div class="title">{{$t('totpTitle')}}</div>
+      <div class="language-row setting-row">
+        <div>{{$t('totpStatus')}}</div>
+        <div>
+          <el-tag :type="totpEnabled ? 'success' : 'info'">{{ totpEnabled ? $t('totpOn') : $t('totpOff') }}</el-tag>
+          <el-button type="primary" style="margin-left: 10px" @click="totpEnabled ? (totpDisableShow = true) : startTotpSetup()">{{ totpEnabled ? $t('totpDisableBtn') : $t('totpEnableBtn') }}</el-button>
+        </div>
+      </div>
+      <div class="security-desc">{{$t('totpDesc')}}</div>
+      <div class="language-row setting-row" v-if="totpEnabled">
+        <div>{{$t('totpBackupTitle')}}</div>
+        <div>
+          <el-button @click="totpRegenShow = true">{{$t('totpRegenerateBtn')}}</el-button>
+        </div>
+      </div>
+    </div>
     <div class="del-email" v-perm="'my:delete'">
       <div class="title">{{$t('deleteUser')}}</div>
       <div style="color: var(--regular-text-color);">
@@ -93,13 +110,51 @@
         <el-button type="primary" :loading="setPwdLoading" @click="submitPwd">{{$t('save')}}</el-button>
       </div>
     </el-dialog>
+    <el-dialog v-model="totpSetupShow" :title="$t('totpSetupTitle')" width="340">
+      <div class="update-pwd">
+        <div class="security-desc">{{$t('totpSetupDesc')}}</div>
+        <el-input :model-value="totpSecret" readonly>
+          <template #append>
+            <el-button @click="copyTotpSecret">{{$t('totpCopySecret')}}</el-button>
+          </template>
+        </el-input>
+        <div>
+          <a :href="totpOtpauthUrl" target="_blank" rel="noopener">{{$t('totpOpenAuthApp')}}</a>
+        </div>
+        <el-input v-model="totpCode" :placeholder="$t('totpCodePlaceholder')" inputmode="numeric" autocomplete="one-time-code" maxlength="6" @keyup.enter="confirmTotpSetup"/>
+        <el-button type="primary" :loading="totpLoading" @click="confirmTotpSetup">{{$t('confirm')}}</el-button>
+      </div>
+    </el-dialog>
+    <el-dialog v-model="totpBackupShow" :title="$t('totpBackupTitle')" width="340">
+      <div class="update-pwd">
+        <div class="security-desc">{{$t('totpBackupDesc')}}</div>
+        <div class="totp-backup-codes">
+          <div v-for="code in totpBackupCodes" :key="code" class="totp-backup-code">{{ code }}</div>
+        </div>
+        <el-button type="primary" @click="totpBackupShow = false">{{$t('totpBackupSaved')}}</el-button>
+      </div>
+    </el-dialog>
+    <el-dialog v-model="totpDisableShow" :title="$t('totpDisableTitle')" width="340">
+      <div class="update-pwd">
+        <div class="security-desc">{{$t('totpDisableDesc')}}</div>
+        <el-input type="password" :placeholder="$t('password')" v-model="totpDisableForm.password" autocomplete="off"/>
+        <el-input v-model="totpDisableForm.code" :placeholder="$t('totpCodePlaceholder')" inputmode="numeric" autocomplete="one-time-code" maxlength="10" @keyup.enter="confirmTotpDisable"/>
+        <el-button type="primary" :loading="totpLoading" @click="confirmTotpDisable">{{$t('confirm')}}</el-button>
+      </div>
+    </el-dialog>
+    <el-dialog v-model="totpRegenShow" :title="$t('totpRegenerateBtn')" width="340">
+      <div class="update-pwd">
+        <el-input v-model="totpRegenCode" :placeholder="$t('totpCodePlaceholder')" inputmode="numeric" autocomplete="one-time-code" maxlength="6" @keyup.enter="confirmTotpRegen"/>
+        <el-button type="primary" :loading="totpLoading" @click="confirmTotpRegen">{{$t('confirm')}}</el-button>
+      </div>
+    </el-dialog>
   </div>
     </el-scrollbar>
   </div>
 </template>
 <script setup>
 import {reactive, ref, watch, defineOptions} from 'vue'
-import {resetPassword, userDelete, setEmailSecurity} from "@/request/my.js";
+import {resetPassword, userDelete, setEmailSecurity, totpSetup, totpEnable, totpDisable, totpRegenerateBackupCodes} from "@/request/my.js";
 import {useUserStore} from "@/store/user.js";
 import router from "@/router/index.js";
 import {accountSetName} from "@/request/account.js";
@@ -274,6 +329,106 @@ function saveEmailSecurity() {
   })
 }
 
+// Two-factor authentication (TOTP). The enabled flag comes from the
+// login user info; the secret is only ever shown during setup, and
+// backup codes only once, when they are (re)generated.
+const totpEnabled = ref(userStore.user.totpEnabled === 1)
+const totpSetupShow = ref(false)
+const totpBackupShow = ref(false)
+const totpDisableShow = ref(false)
+const totpRegenShow = ref(false)
+const totpSecret = ref('')
+const totpOtpauthUrl = ref('')
+const totpCode = ref('')
+const totpBackupCodes = ref([])
+const totpDisableForm = reactive({ password: '', code: '' })
+const totpRegenCode = ref('')
+const totpLoading = ref(false)
+
+watch(() => userStore.user.totpEnabled, () => {
+  totpEnabled.value = userStore.user.totpEnabled === 1
+})
+
+function startTotpSetup() {
+  totpLoading.value = true
+  totpSetup().then((data) => {
+    totpSecret.value = data.secret
+    totpOtpauthUrl.value = data.otpauthUrl
+    totpCode.value = ''
+    totpSetupShow.value = true
+    totpLoading.value = false
+  }).catch(() => {
+    totpLoading.value = false
+  })
+}
+
+function confirmTotpSetup() {
+  if (totpCode.value.length !== 6) return
+  totpLoading.value = true
+  totpEnable(totpCode.value).then((data) => {
+    totpBackupCodes.value = data.backupCodes || []
+    totpSetupShow.value = false
+    totpBackupShow.value = true
+    totpEnabled.value = true
+    userStore.user.totpEnabled = 1
+    totpLoading.value = false
+    ElMessage({
+      message: t('saveSuccessMsg'),
+      type: 'success',
+      plain: true,
+    })
+  }).catch(() => {
+    totpLoading.value = false
+  })
+}
+
+function copyTotpSecret() {
+  const done = () => {
+    ElMessage({
+      message: t('totpSecretCopied'),
+      type: 'success',
+      plain: true,
+    })
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(totpSecret.value).then(done).catch(() => {})
+  }
+}
+
+function confirmTotpDisable() {
+  if (!totpDisableForm.password || !totpDisableForm.code) return
+  totpLoading.value = true
+  totpDisable(totpDisableForm.password, totpDisableForm.code).then(() => {
+    totpDisableShow.value = false
+    totpEnabled.value = false
+    userStore.user.totpEnabled = 0
+    totpDisableForm.password = ''
+    totpDisableForm.code = ''
+    totpLoading.value = false
+    ElMessage({
+      message: t('saveSuccessMsg'),
+      type: 'success',
+      plain: true,
+    })
+  }).catch(() => {
+    totpLoading.value = false
+  })
+}
+
+function confirmTotpRegen() {
+  if (totpRegenCode.value.length !== 6) return
+  totpLoading.value = true
+  totpRegenerateBackupCodes(totpRegenCode.value).then((data) => {
+    totpBackupCodes.value = data.backupCodes || []
+    totpRegenShow.value = false
+    totpRegenCode.value = ''
+    totpBackupShow.value = true
+    totpLoading.value = false
+  }).catch(() => {
+    totpLoading.value = false
+  })
+}
+
 </script>
 <style scoped lang="scss">
 .settings-page {
@@ -385,6 +540,21 @@ function saveEmailSecurity() {
     color: var(--regular-text-color);
     font-size: 13px;
     line-height: 1.5;
+  }
+
+  .totp-backup-codes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .totp-backup-code {
+    font-family: monospace;
+    font-size: 14px;
+    text-align: center;
+    padding: 6px 0;
+    border: 1px solid var(--el-border-color);
+    border-radius: 6px;
   }
 
   .del-email {

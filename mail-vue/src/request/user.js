@@ -9,6 +9,10 @@ export function userSetPwd(params) {
     return http.put('/user/setPwd', params)
 }
 
+export function userDisableTotp(params) {
+    return http.put('/user/disableTotp', params)
+}
+
 export function userSetStatus(params) {
     return http.put('/user/setStatus', params)
 }
