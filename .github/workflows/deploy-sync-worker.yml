@@ -9,7 +9,7 @@ name: 🔁 Deploy cloud-mail sync worker to Cloudflare Workers
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
 #   CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID (same ones the main
 #   deploy uses), CLOUDMAIL_ADMIN_EMAIL, CLOUDMAIL_ADMIN_PASSWORD,
-#   SYNC_TOKEN.
+#   SYNC_TOKEN, SERVICE_TOKEN.
 # Required repo variables (same page, Variables tab) — secrets work too:
 #   CLOUDMAIL_URL, HOME_HEALTH_URL, HOME_INJECT_URL, USER_MAP.
 # Optional: SYNC_KV_ID (id of an existing SYNC_KV namespace; if unset the
@@ -32,6 +32,7 @@ jobs:
       HOME_INJECT_URL: ${{ secrets.HOME_INJECT_URL || vars.HOME_INJECT_URL }}
       USER_MAP: ${{ secrets.USER_MAP || vars.USER_MAP }}
       CLOUDMAIL_ADMIN_EMAIL: ${{ secrets.CLOUDMAIL_ADMIN_EMAIL }}
+      SERVICE_TOKEN: ${{ secrets.SERVICE_TOKEN }}
       CLOUDMAIL_ADMIN_PASSWORD: ${{ secrets.CLOUDMAIL_ADMIN_PASSWORD }}
       SYNC_TOKEN: ${{ secrets.SYNC_TOKEN }}
 
@@ -56,7 +57,7 @@ jobs:
         working-directory: ./sync-worker
         run: |
           fail=0
-          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDMAIL_URL HOME_HEALTH_URL HOME_INJECT_URL USER_MAP CLOUDMAIL_ADMIN_EMAIL CLOUDMAIL_ADMIN_PASSWORD SYNC_TOKEN; do
+          for v in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDMAIL_URL HOME_HEALTH_URL HOME_INJECT_URL USER_MAP CLOUDMAIL_ADMIN_EMAIL CLOUDMAIL_ADMIN_PASSWORD SYNC_TOKEN SERVICE_TOKEN; do
             if [ -z "${!v}" ]; then echo "❌ $v is not set (add it as a repo secret or variable)."; fail=1; fi
           done
           if ! jq -e . >/dev/null 2>&1 <<< "$USER_MAP"; then echo "❌ USER_MAP is not valid JSON (e.g. {\"1\": \"support@bearermail.com\", \"2\": \"jett@bearermail.com\"})."; fail=1; fi
@@ -129,4 +130,5 @@ jobs:
           printf '%s' "$CLOUDMAIL_ADMIN_EMAIL" | npx wrangler secret put CLOUDMAIL_ADMIN_EMAIL
           printf '%s' "$CLOUDMAIL_ADMIN_PASSWORD" | npx wrangler secret put CLOUDMAIL_ADMIN_PASSWORD
           printf '%s' "$SYNC_TOKEN" | npx wrangler secret put SYNC_TOKEN
+          printf '%s' "$SERVICE_TOKEN" | npx wrangler secret put SERVICE_TOKEN
           echo "✅ Secrets set. Test with: curl https://cloud-mail-sync.<your-subdomain>.workers.dev/sync"
