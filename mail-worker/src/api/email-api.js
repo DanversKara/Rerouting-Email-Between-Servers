@@ -35,6 +35,14 @@ app.delete('/email/delete', async (c) => {
 	return c.json(result.ok());
 });
 
+// Report spam to the admin. Session-authenticated like /email/list
+// (not in requirePerms); the service enforces caller scope.
+app.post('/email/reportSpam', async (c) => {
+	const { emailId } = await c.req.json();
+	const data = await emailService.reportSpam(c, Number(emailId), userContext.getUserId(c));
+	return c.json(result.ok(data));
+});
+
 app.get('/email/attList', async (c) => {
 	const attList = await attService.list(c, c.req.query(), userContext.getUserId(c));
 	return c.json(result.ok(attList));

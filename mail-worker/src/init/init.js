@@ -25,6 +25,7 @@ const dbInit = {
 		await this.v3_5DB(c);
 		await this.v3_6DB(c);
 		await this.v3_7DB(c);
+		await this.v3_8DB(c);
 		await userService.initAdmin(c);
 		await settingService.refresh(c);
 		return c.text('success');
@@ -57,6 +58,21 @@ const dbInit = {
 		// public_api = 1 (CLOSE) in intDB below.
 		try {
 			await c.env.db.prepare(`ALTER TABLE setting ADD COLUMN public_api INTEGER NOT NULL DEFAULT 1;`).run();
+		} catch (e) {
+			console.warn(`sql skip:${e.message}`);
+		}
+	},
+
+	async v3_8DB(c) {
+		// Per-user email security prefs (user Settings, NOT System Settings).
+		// block_images defaults to 1 (remote images blocked); disable_links
+		// defaults to 0 (links work). Idempotent: the ALTER fails harmlessly
+		// on databases that already have the columns.
+		try {
+			await c.env.db.batch([
+				c.env.db.prepare(`ALTER TABLE user ADD COLUMN block_images INTEGER NOT NULL DEFAULT 1;`),
+				c.env.db.prepare(`ALTER TABLE user ADD COLUMN disable_links INTEGER NOT NULL DEFAULT 0;`)
+			]);
 		} catch (e) {
 			console.warn(`sql skip:${e.message}`);
 		}

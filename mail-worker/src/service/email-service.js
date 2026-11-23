@@ -1618,6 +1618,76 @@ const emailService = {
 		await orm(c).delete(email).where(eq(email.accountId, accountId)).run();
 	},
 
+	// Report spam: deliver a copy to the admin's inbox (a normal received
+	// email, so the admin's new-mail notification fires) and move the
+	// original to the reporter's trash (logical delete only - never the
+	// physical delete the syncDelete setting would trigger in delete()).
+	// Caller-scoped: the caller can only report their own mail. The sender
+	// is NOT blocked and is NOT added to any blocklist - report-to-admin only.
+	async reportSpam(c, emailId, userId) {
+		const original = await this.selectById(c, emailId);
+		if (!original) {
+			throw new BizError(t('reportSpamNotFound'), 404);
+		}
+		if (original.userId !== userId) {
+			throw new BizError(t('unauthorized'), 403);
+		}
+		const reporter = await userService.selectById(c, userId);
+		const adminAccount = await accountService.selectByEmailIncludeDel(c, c.env.admin);
+		if (!adminAccount) {
+			throw new BizError(t('reportSpamNoAdmin'));
+		}
+		const escapeHtml = (value) => String(value ?? '')
+			.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+		const reportText = [
+			t('spamReportIntro'),
+			`${t('spamReportBy')}: ${reporter.email}`,
+			`${t('spamReportFrom')}: ${original.sendEmail || ''} (${original.name || ''})`,
+			`${t('spamReportSubject')}: ${original.subject || ''}`,
+			`${t('spamReportDate')}: ${original.createTime || ''}`,
+			`${t('spamReportTo')}: ${original.toEmail || ''}`,
+			'---',
+			emailUtils.htmlToText(original.content || '')
+		].join('\n');
+		const reportHtml = [
+			'<div>',
+			`<p><b>${escapeHtml(t('spamReportIntro'))}</b></p>`,
+			`<p>${escapeHtml(t('spamReportBy'))}: ${escapeHtml(reporter.email)}</p>`,
+			'<ul>',
+			`<li>${escapeHtml(t('spamReportFrom'))}: ${escapeHtml(original.sendEmail || '')} (${escapeHtml(original.name || '')})</li>`,
+			`<li>${escapeHtml(t('spamReportSubject'))}: ${escapeHtml(original.subject || '')}</li>`,
+			`<li>${escapeHtml(t('spamReportDate'))}: ${escapeHtml(original.createTime || '')}</li>`,
+			`<li>${escapeHtml(t('spamReportTo'))}: ${escapeHtml(original.toEmail || '')}</li>`,
+			'</ul>',
+			'<hr>',
+			original.content || '',
+			'</div>'
+		].join('');
+		const reportRow = await orm(c).insert(email).values({
+			sendEmail: reporter.email,
+			name: emailUtils.getName(reporter.email),
+			senderEmail: reporter.email,
+			accountId: adminAccount.accountId,
+			userId: adminAccount.userId,
+			subject: `[Spam report] ${original.subject || ''}`,
+			text: reportText,
+			content: reportHtml,
+			cc: '[]',
+			bcc: '[]',
+			recipient: JSON.stringify([{ address: c.env.admin, name: emailUtils.getName(c.env.admin) }]),
+			toEmail: c.env.admin,
+			toName: emailUtils.getName(c.env.admin),
+			type: emailConst.type.RECEIVE,
+			status: emailConst.status.RECEIVE,
+			unread: emailConst.unread.UNREAD,
+			isDel: isDel.NORMAL
+		}).returning().get();
+		notifyMailWsFromContext(c, reportRow);
+		await orm(c).update(email).set({ isDel: isDel.DELETE }).where(
+			and(eq(email.userId, userId), eq(email.emailId, emailId))).run();
+		return { reportEmailId: reportRow.emailId };
+	},
+
 	async read(c, params, userId) {
 		const { emailIds } = params;
 		await orm(c).update(email).set({ unread: emailConst.unread.READ }).where(and(eq(email.userId, userId), inArray(email.emailId, emailIds)));

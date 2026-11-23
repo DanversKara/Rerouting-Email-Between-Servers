@@ -60,6 +60,23 @@
         </div>
       </div>
     </div>
+    <div class="preference-item">
+      <div class="title">{{$t('emailSecurityTitle')}}</div>
+      <div class="language-row setting-row">
+        <div>{{$t('blockImages')}}</div>
+        <div>
+          <el-switch v-model="blockImages" @change="saveEmailSecurity"/>
+        </div>
+      </div>
+      <div class="security-desc">{{$t('blockImagesDesc')}}</div>
+      <div class="language-row setting-row">
+        <div>{{$t('disableLinks')}}</div>
+        <div>
+          <el-switch v-model="disableLinks" @change="saveEmailSecurity"/>
+        </div>
+      </div>
+      <div class="security-desc">{{$t('disableLinksDesc')}}</div>
+    </div>
     <div class="del-email" v-perm="'my:delete'">
       <div class="title">{{$t('deleteUser')}}</div>
       <div style="color: var(--regular-text-color);">
@@ -81,8 +98,8 @@
   </div>
 </template>
 <script setup>
-import {reactive, ref, defineOptions} from 'vue'
-import {resetPassword, userDelete} from "@/request/my.js";
+import {reactive, ref, watch, defineOptions} from 'vue'
+import {resetPassword, userDelete, setEmailSecurity} from "@/request/my.js";
 import {useUserStore} from "@/store/user.js";
 import router from "@/router/index.js";
 import {accountSetName} from "@/request/account.js";
@@ -229,6 +246,34 @@ function submitPwd() {
 
 }
 
+// Per-user email security prefs. blockImages defaults to blocked (true)
+// when the row predates the migration; disableLinks defaults to off.
+const blockImages = ref(userStore.user.blockImages !== 0)
+const disableLinks = ref(userStore.user.disableLinks === 1)
+
+watch(() => [userStore.user.blockImages, userStore.user.disableLinks], () => {
+  blockImages.value = userStore.user.blockImages !== 0
+  disableLinks.value = userStore.user.disableLinks === 1
+})
+
+function saveEmailSecurity() {
+  setEmailSecurity({
+    blockImages: blockImages.value ? 1 : 0,
+    disableLinks: disableLinks.value ? 1 : 0,
+  }).then(() => {
+    userStore.user.blockImages = blockImages.value ? 1 : 0
+    userStore.user.disableLinks = disableLinks.value ? 1 : 0
+    ElMessage({
+      message: t('saveSuccessMsg'),
+      type: 'success',
+      plain: true,
+    })
+  }).catch(() => {
+    blockImages.value = userStore.user.blockImages !== 0
+    disableLinks.value = userStore.user.disableLinks === 1
+  })
+}
+
 </script>
 <style scoped lang="scss">
 .settings-page {
@@ -334,6 +379,12 @@ function submitPwd() {
   .language-select {
     width: 110px;
     max-width: 100%;
+  }
+
+  .security-desc {
+    color: var(--regular-text-color);
+    font-size: 13px;
+    line-height: 1.5;
   }
 
   .del-email {

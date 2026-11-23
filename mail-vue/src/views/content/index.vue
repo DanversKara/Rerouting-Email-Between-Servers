@@ -3,6 +3,7 @@
     <div class="header-actions">
       <Icon class="icon" icon="material-symbols-light:arrow-back-ios-new" width="20" height="20" @click="handleBack"/>
       <Icon v-perm="'email:delete'" class="icon" icon="uiw:delete" width="16" height="16" @click="handleDelete"/>
+      <Icon v-if="email && email.type === 0" class="icon" icon="material-symbols-light:report" width="19" height="19" :title="$t('reportSpam')" @click="handleReportSpam"/>
       <span class="star" v-if="emailStore.contentData.showStar">
         <Icon class="icon" @click="changeStar" v-if="email.isStar" icon="fluent-color:star-16" width="20" height="20"/>
         <Icon class="icon" @click="changeStar" v-else icon="solar:star-line-duotone" width="18.5" height="18.5"/>
@@ -43,7 +44,12 @@
             <el-alert v-if="email.status === 5" :closable="false" :title="$t('delayed')" class="email-msg" type="warning" show-icon />
           </div>
           <el-scrollbar class="htm-scrollbar" :class="!email.attList?.length ? 'bottom-distance' : ''">
-            <ShadowHtml class="shadow-html" :html="formatImage(email.content)" v-if="email.content" />
+            <div v-if="showImageBanner" class="image-banner">
+              <span class="image-banner-text">{{ $t('imagesBlockedMsg', { count: processedContent.blocked }) }}</span>
+              <el-button size="small" @click="showImagesOnce = true">{{ $t('showImagesOnce') }}</el-button>
+              <el-button size="small" type="primary" @click="alwaysShowImages">{{ $t('alwaysShowImages') }}</el-button>
+            </div>
+            <ShadowHtml class="shadow-html" :html="processedContent.html" v-if="email.content" />
             <pre v-else class="email-text" >{{email.text}}</pre>
           </el-scrollbar>
           <div class="att" v-if="email.attList?.length > 0">
@@ -86,9 +92,11 @@ import ShadowHtml from '@/components/shadow-html/index.vue'
 import {computed, reactive, ref, watch, onMounted, onUnmounted, nextTick} from "vue";
 import {useRouter} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
-import {emailDelete, emailRead} from "@/request/email.js";
+import {emailDelete, emailRead, emailReportSpam} from "@/request/email.js";
+import {setEmailSecurity} from "@/request/my.js";
 import {Icon} from "@iconify/vue";
 import {useEmailStore} from "@/store/email.js";
+import {useUserStore} from "@/store/user.js";
 import {useAccountStore} from "@/store/account.js";
 import {formatDetailDate} from "@/utils/day.js";
 import {starAdd, starCancel} from "@/request/star.js";
@@ -104,6 +112,7 @@ const { t } = useI18n()
 
 const uiStore = useUiStore();
 const settingStore = useSettingStore();
+const userStore = useUserStore();
 const accountStore = useAccountStore();
 const emailStore = useEmailStore();
 const router = useRouter()
@@ -239,10 +248,136 @@ function toMessage(message) {
   return  message ? JSON.parse(message).message : '';
 }
 
-function formatImage(content) {
-  content = content || '';
-  const domain = settingStore.settings.r2Domain;
-  return  content.replace(/{{domain}}/g, toOssDomain(domain) + '/');
+// --- Per-user email security (blockImages / disableLinks) ---
+// Whether the current user blocks remote images in emails (default on).
+// blockImages is 1 when blocked; undefined (pre-migration rows) means blocked.
+const blockImages = computed(() => userStore.user.blockImages !== 0)
+// Whether the current user disables links in emails (default off).
+const disableLinks = computed(() => userStore.user.disableLinks === 1)
+// One-time image show for this email only; reset when another email opens.
+const showImagesOnce = ref(false)
+watch(() => email.value?.emailId, () => { showImagesOnce.value = false })
+
+// Remote-resource attributes the server rewriter touches
+// (proxy-service.js ATTRS) plus srcset/poster. A URL is "remote" unless it
+// is inline data, a CID reference, or one of our own signed attachment
+// links on the R2 origin - everything else must never load while images
+// are blocked.
+const REMOTE_ATTRS = ['src', 'poster', 'background', 'data-src', 'data-original', 'data-lazy-src']
+const BLOCKED_PLACEHOLDER_STYLE = 'display:inline-block;background:#f0f0f0;color:#888;border:1px dashed #ccc;padding:4px 8px;border-radius:4px;font-size:12px;'
+function isRemoteResource(value, r2Origin) {
+  if (!value) return false
+  const v = String(value).trim()
+  if (!v || v.startsWith('#')) return false
+  if (/^(data|blob|cid):/i.test(v)) return false
+  if (v.startsWith('{{domain}}')) return false
+  if (v.startsWith('/attachments/')) return false
+  if (r2Origin && v.startsWith(r2Origin + '/attachments/')) return false
+  return true
+}
+function stripRemoteCssUrls(css, r2Origin) {
+  if (!css) return css
+  return String(css).replace(/url\(\s*(['"]?)(.*?)\1\s*\)/gi, (match, quote, url) => {
+    return isRemoteResource(url, r2Origin) ? 'none' : match
+  })
+}
+function blockedPlaceholder(doc, label) {
+  const span = doc.createElement('span')
+  span.setAttribute('class', 'cm-blocked-media')
+  span.setAttribute('style', BLOCKED_PLACEHOLDER_STYLE)
+  span.textContent = label
+  return span
+}
+function processEmailHtml(rawHtml) {
+  let blocked = 0
+  const r2Origin = toOssDomain(settingStore.settings.r2Domain)
+  // {{domain}} placeholders are expanded first so local attachments can be
+  // told apart from remote URLs (same expansion formatImage did before).
+  let html = (rawHtml || '').replace(/{{domain}}/g, toOssDomain(settingStore.settings.r2Domain) + '/')
+  if (!html) return { html, blocked }
+  const doc = new DOMParser().parseFromString(html, 'text/html')
+  if (blockImages.value && !showImagesOnce.value) {
+    // Remote images / media: replace the element with a placeholder so the
+    // browser never requests the URL - no tracking pixel, font, stylesheet,
+    // video, iframe or background may load while images are blocked.
+    doc.querySelectorAll('img,video,audio,iframe,input').forEach(el => {
+      const tag = el.tagName
+      const isImageInput = tag === 'INPUT' && (el.getAttribute('type') || '').toLowerCase() === 'image'
+      if (tag === 'INPUT' && !isImageInput) return
+      const remote = REMOTE_ATTRS.some(attr => isRemoteResource(el.getAttribute(attr), r2Origin)) ||
+        (el.getAttribute('srcset') || '').split(',').some(part => isRemoteResource(part.trim().split(/\s+/, 1)[0], r2Origin))
+      if (!remote) return
+      blocked++
+      const label = tag === 'IMG' || isImageInput ? t('blockedImage') : t('blockedMedia')
+      el.replaceWith(blockedPlaceholder(doc, label))
+    })
+    doc.querySelectorAll('source,track').forEach(el => {
+      const remote = REMOTE_ATTRS.some(attr => isRemoteResource(el.getAttribute(attr), r2Origin)) ||
+        (el.getAttribute('srcset') || '').split(',').some(part => isRemoteResource(part.trim().split(/\s+/, 1)[0], r2Origin))
+      if (!remote) return
+      blocked++
+      el.remove()
+    })
+    doc.querySelectorAll('link[href]').forEach(el => {
+      if (isRemoteResource(el.getAttribute('href'), r2Origin)) {
+        blocked++
+        el.remove()
+      }
+    })
+    doc.querySelectorAll('[background]').forEach(el => {
+      if (isRemoteResource(el.getAttribute('background'), r2Origin)) {
+        blocked++
+        el.removeAttribute('background')
+      }
+    })
+    doc.querySelectorAll('[style]').forEach(el => {
+      const before = el.getAttribute('style') || ''
+      const after = stripRemoteCssUrls(before, r2Origin)
+      if (after !== before) {
+        blocked++
+        el.setAttribute('style', after)
+      }
+    })
+    doc.querySelectorAll('style').forEach(el => {
+      const before = el.textContent || ''
+      const after = stripRemoteCssUrls(before, r2Origin)
+      if (after !== before) {
+        blocked++
+        el.textContent = after
+      }
+    })
+  }
+  if (disableLinks.value) {
+    // Links become plain text showing the REAL destination, never the
+    // display text - a link reading "sofi.com" that points at
+    // "fake-sofi.com" shows as "https://fake-sofi.com".
+    doc.querySelectorAll('a[href]').forEach(el => {
+      const href = el.getAttribute('href') || ''
+      const span = doc.createElement('span')
+      span.setAttribute('class', 'cm-link-text')
+      span.setAttribute('style', 'overflow-wrap:anywhere;word-break:break-all;')
+      span.textContent = href
+      el.replaceWith(span)
+    })
+  }
+  // Serialize the whole document so <style> blocks in <head> survive;
+  // ShadowHtml parses it again and imports head styles as before.
+  return { html: new XMLSerializer().serializeToString(doc), blocked }
+}
+// Rendered email HTML for this view, with the user's security prefs applied.
+// Recomputed when the email, the prefs, or the one-time show flag change.
+const processedContent = computed(() => processEmailHtml(email.value?.content || ''))
+const showImageBanner = computed(() => blockImages.value && !showImagesOnce.value && processedContent.value.blocked > 0 && !!email.value?.content)
+
+function alwaysShowImages() {
+  setEmailSecurity({ blockImages: 0 }).then(() => {
+    userStore.user.blockImages = 0
+    ElMessage({
+      message: t('saveSuccessMsg'),
+      type: 'success',
+      plain: true,
+    })
+  })
 }
 
 function showImage(att) {
@@ -323,6 +458,24 @@ const handleDelete = () => {
     router.back()
   })
 }
+
+const handleReportSpam = () => {
+  ElMessageBox.confirm(t('reportSpamConfirm'), {
+    confirmButtonText: t('confirm'),
+    cancelButtonText: t('cancel'),
+    type: 'warning'
+  }).then(() => {
+    emailReportSpam(email.value.emailId).then(() => {
+      ElMessage({
+        message: t('reportSpamSuccessMsg'),
+        type: 'success',
+        plain: true,
+      })
+      emailStore.deleteIds = [email.value.emailId]
+      router.back()
+    })
+  })
+}
 </script>
 <style scoped lang="scss">
 .box {
@@ -371,6 +524,25 @@ const handleDelete = () => {
   }
 
   .htm-scrollbar {
+  }
+
+  .image-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    background: var(--el-color-warning-light-9);
+    border: 1px solid var(--el-color-warning-light-5);
+    border-radius: 6px;
+    color: var(--el-text-color-regular);
+    font-size: 13px;
+  }
+
+  .image-banner-text {
+    flex: 1;
+    min-width: 200px;
   }
 
   .content {

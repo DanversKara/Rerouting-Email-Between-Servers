@@ -17,6 +17,11 @@ const user = sqliteTable('user', {
 	sort: text('sort').default(0),
 	sendCount: text('send_count').default(0),
 	regKeyId: integer('reg_key_id').default(0).notNull(),
-	isDel: integer('is_del').default(0).notNull()
+	isDel: integer('is_del').default(0).notNull(),
+	// Email security prefs (per user, in the user's own Settings page).
+	// blockImages: 1 = remote images in emails are blocked (default).
+	// disableLinks: 1 = links in emails render as plain text (default 0).
+	blockImages: integer('block_images').default(1).notNull(),
+	disableLinks: integer('disable_links').default(0).notNull()
 });
 export default user

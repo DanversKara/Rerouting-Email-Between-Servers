@@ -47,6 +47,8 @@ const userService = {
 		user.permKeys = permKeys;
 		user.role = roleRow;
 		user.type = userRow.type;
+		user.blockImages = userRow.blockImages ?? 1;
+		user.disableLinks = userRow.disableLinks ?? 0;
 
 		if (c.env.admin === userRow.email) {
 			user.role = constant.ADMIN_ROLE
@@ -56,6 +58,20 @@ const userService = {
 		return user;
 	},
 
+
+	async setEmailSecurity(c, params, userId) {
+		const updates = {};
+		if (params.blockImages !== undefined) {
+			updates.blockImages = Number(params.blockImages) ? 1 : 0;
+		}
+		if (params.disableLinks !== undefined) {
+			updates.disableLinks = Number(params.disableLinks) ? 1 : 0;
+		}
+		if (!Object.keys(updates).length) {
+			return;
+		}
+		await orm(c).update(user).set(updates).where(eq(user.userId, userId)).run();
+	},
 
 	async resetPassword(c, params, userId) {
 
