@@ -32,6 +32,14 @@
       @search="returnToList('send')"
       @reset="returnToList('send')"
     />
+    <email-search
+      v-else-if="showTrashSearch"
+      :store="trashStore"
+      :search-options="trashSearchOptions"
+      :class="{ 'account-show': accountPanelShow }"
+      @search="returnToList('trash')"
+      @reset="returnToList('trash')"
+    />
     <all-email-search
       v-else-if="showAllMailSearch"
       :class="{ 'account-show': accountPanelShow }"
@@ -115,6 +123,7 @@ import emailSearch from '@/components/email-search/index.vue'
 import allEmailSearch from '@/components/all-email-search/index.vue'
 import {useEmailStore} from '@/store/email.js'
 import {useSendStore} from '@/store/send.js'
+import {useTrashStore} from '@/store/trash.js'
 
 const {t} = useI18n();
 const route = useRoute();
@@ -123,6 +132,7 @@ const userStore = useUserStore();
 const uiStore = useUiStore();
 const emailStore = useEmailStore()
 const sendStore = useSendStore()
+const trashStore = useTrashStore()
 const logoutLoading = ref(false)
 const userDropdownRef = ref(null)
 const userCardVisible = ref(false)
@@ -139,12 +149,22 @@ const sentSearchOptions = computed(() => [
   {label: t('searchSummaryContent'), type: 'content'},
   {label: t('searchRecipientAddress'), type: 'recipientAddress'},
 ])
+const trashSearchOptions = computed(() => [
+  {label: t('subject'), type: 'subject'},
+  {label: t('searchSummaryContent'), type: 'content'},
+  {label: t('sender'), type: 'sender'},
+  {label: t('searchSenderAddress'), type: 'senderAddress'},
+  {label: t('searchRecipientAddress'), type: 'recipientAddress'},
+])
 const accountPanelShow = computed(() => uiStore.accountShow && hasPerm('account:query'))
 const showInboxSearch = computed(() =>
   route.meta.name === 'email' || isMailboxDetail('inbox')
 )
 const showSentSearch = computed(() =>
   route.meta.name === 'send' || isMailboxDetail('sent')
+)
+const showTrashSearch = computed(() =>
+  route.meta.name === 'trash' || isMailboxDetail('trash')
 )
 const showAllMailSearch = computed(() =>
   route.meta.name === 'all-email' || isMailboxDetail('all-mail')

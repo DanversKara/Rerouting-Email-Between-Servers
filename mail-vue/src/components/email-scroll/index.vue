@@ -15,6 +15,7 @@
         <Icon v-perm="'email:delete'" class="icon delete" icon="uiw:delete" width="16" height="16"
               v-if="getSelectedMailsIds().length > 0"
               @click="handleDelete"/>
+        <el-button v-if="isTrash && getSelectedMailsIds().length > 0" size="small" @click="handleRestore">{{ $t('restore') }}</el-button>
         <Icon v-perm="'email:delete'" class="icon delete" icon="fluent:mail-read-20-regular" width="21" height="21"
               v-if="getSelectedMailsIds().length > 0 && showUnread"
               @click="handleRead"/>
@@ -221,11 +222,19 @@
               </div>
             </template>
           </el-dropdown-item>
+          <el-dropdown-item v-if="isTrash" @click="handleRestoreOne(rightClickEmail.emailId)">
+            <template #default>
+              <div class="right-dropdown-item">
+                <Icon icon="ion:reload" width="20" height="20" />
+                <span>{{t('restore')}}</span>
+              </div>
+            </template>
+          </el-dropdown-item>
           <el-dropdown-item @click="rightDelete(rightClickEmail.emailId)">
             <template #default>
               <div class="right-dropdown-item">
                 <Icon icon="uiw:delete" width="16" height="20" style="margin-left: 1px;margin-right: 3px" />
-                <span>{{t('delete')}}</span>
+                <span>{{t(isTrash ? 'deleteForever' : 'delete')}}</span>
               </div>
             </template>
           </el-dropdown-item>
@@ -253,7 +262,12 @@ import { useScroll } from '@vueuse/core'
 const props = defineProps({
   getEmailList: Function,
   emailDelete: Function,
+  emailRestore: Function,
   emailRead: Function,
+  isTrash: {
+    type: Boolean,
+    default: false
+  },
   starAdd: Function,
   starCancel: Function,
   cancelSuccess: Function,
@@ -633,6 +647,26 @@ function localRead(emailIds) {
 
 function rightDelete(emailId) {
 
+  // In trash, Delete means permanently erase - confirm it and say so.
+  if (props.isTrash) {
+    ElMessageBox.confirm(t('delForeverEmailConfirm'), {
+      confirmButtonText: t('confirm'),
+      cancelButtonText: t('cancel'),
+      type: 'warning'
+    }).then(() => {
+      props.emailDelete([emailId]).then(() => {
+        ElMessage({
+          message: t('delForeverSuccessMsg'),
+          type: 'success',
+          plain: true
+        })
+        emailStore.deleteIds = [emailId];
+        accountStore.refreshUnreadCounts()
+      })
+    })
+    return;
+  }
+
   if (props.type === 'all-email') {
     ElMessageBox.confirm(t('delOneEmailConfirm'), {
       confirmButtonText: t('confirm'),
@@ -685,7 +719,8 @@ async function copyCode(code) {
 }
 
 function handleDelete() {
-  ElMessageBox.confirm(t('delEmailsConfirm'), {
+  // In trash, Delete means permanently erase - say so in the confirm.
+  ElMessageBox.confirm(t(props.isTrash ? 'delForeverEmailsConfirm' : 'delEmailsConfirm'), {
     confirmButtonText: t('confirm'),
     cancelButtonText: t('cancel'),
     type: 'warning'
@@ -700,13 +735,40 @@ function handleDelete() {
     const emailIds = getSelectedMailsIds();
     props.emailDelete(emailIds).then(() => {
       ElMessage({
-        message: t('delSuccessMsg'),
+        message: t(props.isTrash ? 'delForeverSuccessMsg' : 'delSuccessMsg'),
         type: 'success',
         plain: true
       })
       emailStore.deleteIds = emailIds;
       accountStore.refreshUnreadCounts()
     })
+  })
+}
+
+// Trash: put the selected mail back in the inbox. Restoring cannot lose
+// mail, so there is no confirm - the row just leaves the trash list.
+function handleRestore() {
+  const emailIds = getSelectedMailsIds();
+  props.emailRestore(emailIds).then(() => {
+    ElMessage({
+      message: t('restoreSuccessMsg'),
+      type: 'success',
+      plain: true
+    })
+    emailStore.deleteIds = emailIds;
+    accountStore.refreshUnreadCounts()
+  })
+}
+
+function handleRestoreOne(emailId) {
+  props.emailRestore([emailId]).then(() => {
+    ElMessage({
+      message: t('restoreSuccessMsg'),
+      type: 'success',
+      plain: true
+    })
+    emailStore.deleteIds = [emailId];
+    accountStore.refreshUnreadCounts()
   })
 }
 

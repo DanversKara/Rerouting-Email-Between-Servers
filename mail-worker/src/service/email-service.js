@@ -45,6 +45,7 @@ const emailService = {
 			searchType,
 			startDate,
 			endDate,
+			deleted,
 		} = params;
 
 		size = Number(size);
@@ -72,6 +73,7 @@ const emailService = {
 		}
 
 		full = full === 1;
+		deleted = Number(deleted) || 0;
 
 		if (size > 50) {
 			size = 50;
@@ -93,6 +95,7 @@ const emailService = {
 			searchType,
 			startDate,
 			endDate,
+			deleted,
 		});
 		const countFilters = this.emailListFilters({
 			userId,
@@ -104,6 +107,7 @@ const emailService = {
 			searchType,
 			startDate,
 			endDate,
+			deleted,
 		});
 		const columns = full ? emailListColumns : emailBriefColumns;
 
@@ -149,8 +153,8 @@ const emailService = {
 		}).from(email).where(
 			and(
 				eq(email.userId, userId),
-				eq(email.type, type),
-				eq(email.isDel, isDel.NORMAL),
+				deleted ? undefined : eq(email.type, type),
+				eq(email.isDel, deleted ? isDel.DELETE : isDel.NORMAL),
 				allReceive ? undefined : eq(email.accountId, accountId)
 			))
 			.orderBy(desc(email.emailId)).limit(1).get();
@@ -258,13 +262,19 @@ const emailService = {
 		searchType,
 		startDate,
 		endDate,
+		deleted = 0,
 	}) {
+		// Trash view: list the caller's logically-deleted mail of any type
+		// (received and sent), newest first. Everywhere else the list shows
+		// only live mail of one type.
 		const conditions = [
 			eq(email.userId, userId),
-			eq(email.type, type),
-			eq(email.isDel, isDel.NORMAL),
+			eq(email.isDel, deleted ? isDel.DELETE : isDel.NORMAL),
 			eq(account.isDel, isDel.NORMAL),
 		];
+		if (!deleted) {
+			conditions.push(eq(email.type, type));
+		}
 		if (!allReceive) {
 			conditions.push(eq(email.accountId, accountId));
 		}
@@ -399,6 +409,57 @@ const emailService = {
 				eq(email.userId, userId),
 				inArray(email.emailId, emailIdList)))
 			.run();
+	},
+
+	// Trash: put the caller's deleted mail back in the inbox. Caller-scoped
+	// by the update itself - a user can only restore their own mail.
+	async restore(c, params, userId) {
+		const { emailIds } = params;
+		const emailIdList = String(emailIds || '').split(',').map(Number).filter(Boolean);
+		if (!emailIdList.length) {
+			return;
+		}
+		await orm(c).update(email).set({ isDel: isDel.NORMAL }).where(
+			and(
+				eq(email.userId, userId),
+				inArray(email.emailId, emailIdList)))
+			.run();
+	},
+
+	// Trash: permanently erase the caller's deleted mail. Ownership is
+	// verified first because physicsDelete itself is not user-scoped.
+	async deleteForever(c, params, userId) {
+		const { emailIds } = params;
+		const emailIdList = String(emailIds || '').split(',').map(Number).filter(Boolean);
+		if (!emailIdList.length) {
+			return;
+		}
+		const owned = await orm(c).select({ emailId: email.emailId }).from(email)
+			.where(and(eq(email.userId, userId), inArray(email.emailId, emailIdList)))
+			.all();
+		const ownedIds = owned.map(row => row.emailId);
+		if (ownedIds.length) {
+			await this.physicsDelete(c, { emailIds: ownedIds.join(',') });
+		}
+	},
+
+	// Trash: permanently erase everything in the caller's trash, in batches
+	// like autoClean, so a very full trash cannot blow the per-query limits.
+	async emptyTrash(c, userId) {
+		const batchSize = 95;
+		while (true) {
+			const rows = await orm(c).select({ emailId: email.emailId }).from(email)
+				.where(and(eq(email.userId, userId), eq(email.isDel, isDel.DELETE)))
+				.limit(batchSize)
+				.all();
+			if (!rows.length) {
+				break;
+			}
+			await this.physicsDelete(c, { emailIds: rows.map(row => row.emailId).join(',') });
+			if (rows.length < batchSize) {
+				break;
+			}
+		}
 	},
 
 	receive(c, params, cidAttList, r2domain) {

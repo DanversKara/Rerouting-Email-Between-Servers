@@ -3,7 +3,8 @@
     <div class="header-actions">
       <Icon class="icon" icon="material-symbols-light:arrow-back-ios-new" width="20" height="20" @click="handleBack"/>
       <Icon v-perm="'email:delete'" class="icon" icon="uiw:delete" width="16" height="16" @click="handleDelete"/>
-      <Icon v-if="email && email.type === 0" class="icon" icon="material-symbols-light:report" width="19" height="19" :title="$t('reportSpam')" @click="handleReportSpam"/>
+      <Icon v-if="emailStore.contentData.delType === 'trash'" class="icon" icon="ion:reload" width="19" height="19" :title="$t('restore')" @click="handleRestore"/>
+      <Icon v-if="email && email.type === 0 && emailStore.contentData.delType !== 'trash'" class="icon" icon="material-symbols-light:report" width="19" height="19" :title="$t('reportSpam')" @click="handleReportSpam"/>
       <span class="star" v-if="emailStore.contentData.showStar">
         <Icon class="icon" @click="changeStar" v-if="email.isStar" icon="fluent-color:star-16" width="20" height="20"/>
         <Icon class="icon" @click="changeStar" v-else icon="solar:star-line-duotone" width="18.5" height="18.5"/>
@@ -92,7 +93,7 @@ import ShadowHtml from '@/components/shadow-html/index.vue'
 import {computed, reactive, ref, watch, onMounted, onUnmounted, nextTick} from "vue";
 import {useRouter} from 'vue-router'
 import {ElMessage, ElMessageBox} from 'element-plus'
-import {emailDelete, emailRead, emailReportSpam} from "@/request/email.js";
+import {emailDelete, emailDeleteForever, emailRead, emailReportSpam, emailRestore} from "@/request/email.js";
 import {setEmailSecurity} from "@/request/my.js";
 import {Icon} from "@iconify/vue";
 import {useEmailStore} from "@/store/email.js";
@@ -429,12 +430,23 @@ const handleBack = () => {
 }
 
 const handleDelete = () => {
-  ElMessageBox.confirm(t('delEmailConfirm'), {
+  // From trash, Delete means permanently erase - say so in the confirm.
+  const isTrash = emailStore.contentData.delType === 'trash'
+  ElMessageBox.confirm(t(isTrash ? 'delForeverEmailConfirm' : 'delEmailConfirm'), {
     confirmButtonText: t('confirm'),
     cancelButtonText: t('cancel'),
     type: 'warning'
   }).then(() => {
-    if (emailStore.contentData.delType === 'logic') {
+    if (isTrash) {
+      emailDeleteForever(email.value.emailId).then(() => {
+        ElMessage({
+          message: t('delForeverSuccessMsg'),
+          type: 'success',
+          plain: true,
+        })
+        emailStore.deleteIds = [email.value.emailId]
+      })
+    } else if (emailStore.contentData.delType === 'logic') {
       emailDelete(email.value.emailId).then(() => {
         ElMessage({
           message: t('delSuccessMsg'),
@@ -455,6 +467,20 @@ const handleDelete = () => {
       })
     }
 
+    router.back()
+  })
+}
+
+// From trash: put the mail back in the inbox. Restoring cannot lose mail,
+// so there is no confirm - just go back to the trash list.
+const handleRestore = () => {
+  emailRestore([email.value.emailId]).then(() => {
+    ElMessage({
+      message: t('restoreSuccessMsg'),
+      type: 'success',
+      plain: true,
+    })
+    emailStore.deleteIds = [email.value.emailId]
     router.back()
   })
 }

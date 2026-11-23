@@ -35,6 +35,29 @@ app.delete('/email/delete', async (c) => {
 	return c.json(result.ok());
 });
 
+// Trash: restore the caller's deleted mail to the inbox. Session-
+// authenticated like /email/list (not in requirePerms); the service
+// enforces caller scope.
+app.post('/email/restore', async (c) => {
+	const { emailIds } = await c.req.json();
+	await emailService.restore(c, { emailIds }, userContext.getUserId(c));
+	return c.json(result.ok());
+});
+
+// Trash: permanently erase the caller's deleted mail. Session-
+// authenticated like /email/delete; the service verifies ownership
+// before the physical delete.
+app.delete('/email/deleteForever', async (c) => {
+	await emailService.deleteForever(c, c.req.query(), userContext.getUserId(c));
+	return c.json(result.ok());
+});
+
+// Trash: permanently erase everything in the caller's trash.
+app.delete('/email/emptyTrash', async (c) => {
+	await emailService.emptyTrash(c, userContext.getUserId(c));
+	return c.json(result.ok());
+});
+
 // Report spam to the admin. Session-authenticated like /email/list
 // (not in requirePerms); the service enforces caller scope.
 app.post('/email/reportSpam', async (c) => {
