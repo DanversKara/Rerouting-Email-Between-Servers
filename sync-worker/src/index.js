@@ -166,7 +166,14 @@ function cloudmailUrl(env, path) {
 async function login(env) {
 	const res = await fetch(cloudmailUrl(env, '/api/login'), {
 		method: 'POST',
-		headers: { 'Content-Type': 'application/json' },
+		headers: {
+			'Content-Type': 'application/json',
+			// Service token: lets the sync worker sign in as the admin
+			// even when the admin has TOTP on. Long random value, set as
+			// the SERVICE_TOKEN secret on both workers. Sent only here,
+			// on the admin login — never on any other call.
+			...(env.SERVICE_TOKEN ? { 'X-Service-Token': env.SERVICE_TOKEN } : {}),
+		},
 		body: JSON.stringify({
 			email: env.CLOUDMAIL_ADMIN_EMAIL,
 			password: env.CLOUDMAIL_ADMIN_PASSWORD,

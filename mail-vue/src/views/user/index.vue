@@ -99,6 +99,7 @@
                 <template #dropdown>
                   <el-dropdown-menu>
                     <el-dropdown-item @click="openSetPwd(props.row)" >{{ $t('chgPwd') }}</el-dropdown-item>
+                    <el-dropdown-item v-if="props.row.totpEnabled === 1" @click="disableTotp(props.row)">{{ $t('totpDisableAdmin') }}</el-dropdown-item>
                     <el-dropdown-item @click="openSetType(props.row)" >{{ $t('perm') }}</el-dropdown-item>
                     <template v-if="props.row.type !== 0">
                       <el-dropdown-item v-if="props.row.isDel !== 1" @click="setStatus(props.row)">
@@ -388,7 +389,8 @@ import {
   userRestSendCount,
   userRestore,
   userDeleteAccount,
-  userAllAccount
+  userAllAccount,
+  userDisableTotp
 } from '@/request/user.js'
 import {roleSelectUse} from "@/request/role.js";
 import {Icon} from "@iconify/vue";
@@ -992,6 +994,25 @@ function openSetType(user) {
 function openSetPwd(user) {
   userForm.userId = user.userId
   setPwdShow.value = true
+}
+
+// Admin recovery: the user lost the authenticator and the backup
+// codes. Clears TOTP and signs them out everywhere.
+function disableTotp(user) {
+  ElMessageBox.confirm(t('totpDisableAdminConfirm'), {
+    confirmButtonText: t('confirm'),
+    cancelButtonText: t('cancel'),
+    type: 'warning'
+  }).then(() => {
+    userDisableTotp({userId: user.userId}).then(() => {
+      ElMessage({
+        message: t('totpDisableAdminSuccess'),
+        type: 'success',
+        plain: true,
+      })
+      getUserList()
+    })
+  })
 }
 
 function refresh() {

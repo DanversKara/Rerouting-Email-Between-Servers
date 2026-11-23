@@ -158,6 +158,14 @@
           </el-button>
           <div class="switch" @click="show = 'login'">{{ $t('backToLogin') }}</div>
         </div>
+        <div v-show="show === 'totp'">
+          <div class="totp-note">{{ $t('totpLoginDesc') }}</div>
+          <el-input v-model="totpCode" :placeholder="$t('totpCodePlaceholder')" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="10" @keyup.enter="submitTotp"/>
+          <el-button class="btn" type="primary" @click="submitTotp" :loading="totpLoading"
+          >{{ $t('totpVerifyBtn') }}
+          </el-button>
+          <div class="switch" @click="backToLogin">{{ $t('backToLogin') }}</div>
+        </div>
         <template v-if="settingStore.settings.register === 0">
           <div class="switch" @click="show = 'register'" v-if="show === 'login'">{{ $t('noAccount') }}
             <span>{{ $t('regSwitch') }}</span></div>
@@ -210,7 +218,7 @@
 import router from "@/router";
 import {useRoute} from "vue-router";
 import {computed, nextTick, onBeforeUnmount, reactive, ref, watch} from "vue";
-import {login} from "@/request/login.js";
+import {login, verifyTotpLogin} from "@/request/login.js";
 import {register} from "@/request/login.js";
 import {requestPasswordReset, confirmPasswordReset} from "@/request/login.js";
 import {websiteConfig} from "@/request/setting.js";
@@ -235,6 +243,9 @@ const uiStore = useUiStore();
 const settingStore = useSettingStore();
 const route = useRoute();
 const loginLoading = ref(false)
+const totpChallenge = ref('')
+const totpCode = ref('')
+const totpLoading = ref(false)
 const bindLoading = ref(false)
 const oauthLoading = ref(false);
 const showBindForm = ref(false);
@@ -565,11 +576,40 @@ const submit = () => {
 
   const token = verifyToken
   loginLoading.value = true
-  login(email, form.password, token).then(data => saveToken(data.token)).catch(res => {
+  login(email, form.password, token).then(data => {
+    // TOTP on: no token yet — the server issued a challenge instead.
+    if (data && data.totpRequired) {
+      totpChallenge.value = data.challenge
+      totpCode.value = ''
+      show.value = 'totp'
+      return
+    }
+    saveToken(data.token)
+  }).catch(res => {
     if (res.code === 400) settingStore.settings.loginVerifyOpen = true
     if (show.value === 'login' && (token || res.code === 400)) showTurnstile()
   }).finally(() => {
     loginLoading.value = false
+  })
+}
+
+function backToLogin() {
+  totpChallenge.value = ''
+  totpCode.value = ''
+  show.value = 'login'
+}
+
+const submitTotp = () => {
+  if (totpLoading.value) return
+  if (!totpChallenge.value || !totpCode.value) return
+  totpLoading.value = true
+  verifyTotpLogin(totpChallenge.value, totpCode.value).then(data => saveToken(data.token)).catch(res => {
+    // 410 = the challenge is dead (expired or too many wrong codes):
+    // the password step has to run again. Any other error is just a
+    // wrong code — the user retries on the same challenge.
+    if (res.code === 410) backToLogin()
+  }).finally(() => {
+    totpLoading.value = false
   })
 }
 
@@ -918,6 +958,13 @@ function submitReset() {
     color: var(--form-desc-color);
     text-decoration: none;
     cursor: pointer;
+  }
+
+  .totp-note {
+    font-size: 13px;
+    color: var(--regular-text-color);
+    margin-bottom: 12px;
+    line-height: 1.5;
   }
 
   .forgot-note {
