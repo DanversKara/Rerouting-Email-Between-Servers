@@ -56,6 +56,7 @@ admin = "${ADMIN}"
 password = "${PASSWORD}"
 jwt_secret = "${JWT_SECRET}"
 project_link = "${PROJECT_LINK}"
+service_token = "${SERVICE_TOKEN}"
 
 [build]
 command = "pnpm --prefix ../mail-vue install && pnpm --prefix ../mail-vue run build"
