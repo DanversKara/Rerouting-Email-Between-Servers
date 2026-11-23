@@ -21,6 +21,7 @@ import oauthService from "./oauth-service";
 import settingService from './setting-service';
 import starService from './star-service';
 import userContext from '../security/user-context';
+import totpService from './totp-service';
 
 const userService = {
 
@@ -49,6 +50,7 @@ const userService = {
 		user.type = userRow.type;
 		user.blockImages = userRow.blockImages ?? 1;
 		user.disableLinks = userRow.disableLinks ?? 0;
+		user.totpEnabled = userRow.totpEnabled ?? 0;
 
 		if (c.env.admin === userRow.email) {
 			user.role = constant.ADMIN_ROLE
@@ -71,6 +73,123 @@ const userService = {
 			return;
 		}
 		await orm(c).update(user).set(updates).where(eq(user.userId, userId)).run();
+	},
+
+
+	// --- Two-factor authentication (TOTP) ---
+	// The secret is stored AES-GCM-encrypted (see totp-service); backup
+	// codes are stored as salted SHA-256 hashes and are single-use.
+	async setupTotp(c, userId) {
+		const userRow = await this.selectById(c, userId);
+		if (!userRow) {
+			throw new BizError(t('authExpired'), 401);
+		}
+		if (userRow.totpEnabled) {
+			throw new BizError(t('totpAlreadyEnabled'));
+		}
+		const secret = totpService.generateSecret();
+		const encrypted = await totpService.encryptSecret(c, secret);
+		await orm(c).update(user).set({ totpSecret: encrypted }).where(eq(user.userId, userId)).run();
+		return { secret, otpauthUrl: totpService.buildOtpAuthUrl('BearerMail', userRow.email, secret) };
+	},
+
+	async enableTotp(c, params, userId) {
+		const { code } = params;
+		const userRow = await this.selectById(c, userId);
+		if (!userRow) {
+			throw new BizError(t('authExpired'), 401);
+		}
+		if (userRow.totpEnabled) {
+			throw new BizError(t('totpAlreadyEnabled'));
+		}
+		if (!userRow.totpSecret) {
+			throw new BizError(t('totpNoPendingSecret'));
+		}
+		const secret = await totpService.decryptSecret(c, userRow.totpSecret);
+		if (!await totpService.verifyCode(secret, code)) {
+			throw new BizError(t('totpInvalidCode'));
+		}
+		const backupCodes = totpService.generateBackupCodes();
+		const hashed = await totpService.hashBackupCodes(backupCodes);
+		await orm(c).update(user).set({ totpEnabled: 1, totpBackupCodes: hashed }).where(eq(user.userId, userId)).run();
+		return { backupCodes };
+	},
+
+	async disableTotp(c, params, userId) {
+		const { password, code } = params;
+		const userRow = await this.selectById(c, userId);
+		if (!userRow) {
+			throw new BizError(t('authExpired'), 401);
+		}
+		if (!userRow.totpEnabled) {
+			throw new BizError(t('totpNotEnabled'));
+		}
+		if (!password || !await cryptoUtils.verifyPassword(password, userRow.salt, userRow.password)) {
+			throw new BizError(t('IncorrectPwd'));
+		}
+		const ok = await this.verifyTotpCode(c, userRow, code);
+		if (!ok) {
+			throw new BizError(t('totpInvalidCode'));
+		}
+		await orm(c).update(user).set({ totpEnabled: 0, totpSecret: '', totpBackupCodes: '' }).where(eq(user.userId, userId)).run();
+	},
+
+	async regenerateBackupCodes(c, params, userId) {
+		const { code } = params;
+		const userRow = await this.selectById(c, userId);
+		if (!userRow) {
+			throw new BizError(t('authExpired'), 401);
+		}
+		if (!userRow.totpEnabled) {
+			throw new BizError(t('totpNotEnabled'));
+		}
+		// Backup codes alone must not mint fresh backup codes: only a
+		// live authenticator code proves possession of the app.
+		const secret = await totpService.decryptSecret(c, userRow.totpSecret);
+		if (!await totpService.verifyCode(secret, code)) {
+			throw new BizError(t('totpInvalidCode'));
+		}
+		const backupCodes = totpService.generateBackupCodes();
+		const hashed = await totpService.hashBackupCodes(backupCodes);
+		await orm(c).update(user).set({ totpBackupCodes: hashed }).where(eq(user.userId, userId)).run();
+		return { backupCodes };
+	},
+
+	// Verify a TOTP code or a backup code for a user. Backup codes are
+	// single-use: a match consumes the code. Used by the login challenge
+	// and by disableTotp.
+	async verifyTotpCode(c, userRow, code) {
+		const clean = String(code || '').replace(/[\s-]/g, '');
+		if (!userRow.totpSecret) {
+			return false;
+		}
+		if (/^\d{6}$/.test(clean)) {
+			const secret = await totpService.decryptSecret(c, userRow.totpSecret);
+			if (await totpService.verifyCode(secret, code)) {
+				return true;
+			}
+		}
+		if (/^[A-Z0-9]{10}$/i.test(clean)) {
+			const result = await totpService.verifyBackupCode(code, userRow.totpBackupCodes);
+			if (result.matched) {
+				await orm(c).update(user).set({ totpBackupCodes: result.remaining }).where(eq(user.userId, userRow.userId)).run();
+				return true;
+			}
+		}
+		return false;
+	},
+
+	// Admin recovery: a user who lost the authenticator AND the backup
+	// codes has no way back in on their own. The admin clears TOTP for
+	// them; their sessions are dropped everywhere so the recovery is
+	// not silently shadowed by a live login.
+	async adminDisableTotp(c, params) {
+		const { userId } = params;
+		if (!userId) {
+			throw new BizError(t('emptyAccountId'));
+		}
+		await orm(c).update(user).set({ totpEnabled: 0, totpSecret: '', totpBackupCodes: '' }).where(eq(user.userId, Number(userId))).run();
+		await c.env.kv.delete(KvConst.AUTH_INFO + Number(userId));
 	},
 
 	async resetPassword(c, params, userId) {

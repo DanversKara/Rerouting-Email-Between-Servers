@@ -14,6 +14,11 @@ app.put('/user/setPwd', async (c) => {
 	return c.json(result.ok());
 });
 
+app.put('/user/disableTotp', async (c) => {
+	await userService.adminDisableTotp(c, await c.req.json());
+	return c.json(result.ok());
+});
+
 app.put('/user/setStatus', async (c) => {
 	await userService.setStatus(c, await c.req.json());
 	return c.json(result.ok());

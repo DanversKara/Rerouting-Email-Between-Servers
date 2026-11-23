@@ -19,6 +19,7 @@ import dayjs from 'dayjs';
 import { toUtc } from '../utils/date-uitil';
 import { t } from '../i18n/i18n.js';
 import verifyRecordService from './verify-record-service';
+import totpService from './totp-service';
 
 const loginService = {
 
@@ -266,6 +267,29 @@ const loginService = {
 			throw new BizError(t('invalidEmailOrPassword'));
 		}
 
+		// Password logins with TOTP on stop here: no JWT is issued until
+		// the second factor verifies. OAuth logins (noVerifyPwd) skip
+		// TOTP — the OAuth provider already authenticated the user.
+		if (!noVerifyPwd && userRow.totpEnabled) {
+			// Service-token bypass, sync worker only: a long random token
+			// set as the SERVICE_TOKEN secret on both workers, valid for
+			// the admin account only. Browser logins never send it and can
+			// never use it.
+			const serviceToken = c.req.header('X-Service-Token');
+			if (serviceToken && c.env.SERVICE_TOKEN && userRow.email === c.env.admin &&
+				totpService.timingSafeEqual(serviceToken, c.env.SERVICE_TOKEN)) {
+				return this.issueSession(c, userRow);
+			}
+			const challenge = await this.createTotpChallenge(c, userRow.userId);
+			return { totpRequired: true, challenge };
+		}
+
+		return this.issueSession(c, userRow);
+	},
+
+	// Mint a JWT session for a user who already passed every check.
+	// Shared by the password login and the TOTP challenge verification.
+	async issueSession(c, userRow) {
 		const uuid = uuidv4();
 		const jwt = await JwtUtils.generateToken(c,{ userId: userRow.userId, token: uuid, gen: constant.AUTH_GEN });
 
@@ -295,6 +319,46 @@ const loginService = {
 
 		await c.env.kv.put(KvConst.AUTH_INFO + userRow.userId, JSON.stringify(authInfo), { expirationTtl: constant.TOKEN_EXPIRE });
 		return jwt;
+	},
+
+	async createTotpChallenge(c, userId) {
+		const bytes = new Uint8Array(24);
+		crypto.getRandomValues(bytes);
+		const challenge = [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+		await c.env.kv.put(KvConst.TOTP_CHALLENGE + challenge,
+			JSON.stringify({ userId, attempts: 0 }),
+			{ expirationTtl: 300 });
+		return challenge;
+	},
+
+	// Second step of a TOTP login: the challenge is single-use, lives 5
+	// minutes, and dies after 5 wrong codes. A wrong code never reveals
+	// whether the account, the challenge, or the code was the problem
+	// beyond what the password step already established.
+	async verifyTotpChallenge(c, params) {
+		const { challenge, code } = params;
+		const record = await c.env.kv.get(KvConst.TOTP_CHALLENGE + (challenge || ''), { type: 'json' });
+		if (!record) {
+			throw new BizError(t('totpChallengeInvalid'), 410);
+		}
+		if (record.attempts >= 5) {
+			await c.env.kv.delete(KvConst.TOTP_CHALLENGE + challenge);
+			throw new BizError(t('totpTooManyAttempts'), 410);
+		}
+		const userRow = await userService.selectById(c, record.userId);
+		if (!userRow || userRow.status === userConst.status.BAN || !userRow.totpEnabled) {
+			await c.env.kv.delete(KvConst.TOTP_CHALLENGE + challenge);
+			throw new BizError(t('totpChallengeInvalid'), 410);
+		}
+		const ok = await userService.verifyTotpCode(c, userRow, code);
+		if (!ok) {
+			await c.env.kv.put(KvConst.TOTP_CHALLENGE + challenge,
+				JSON.stringify({ userId: record.userId, attempts: record.attempts + 1 }),
+				{ expirationTtl: 300 });
+			throw new BizError(t('totpInvalidCode'));
+		}
+		await c.env.kv.delete(KvConst.TOTP_CHALLENGE + challenge);
+		return this.issueSession(c, userRow);
 	},
 
 	async logout(c, userId) {

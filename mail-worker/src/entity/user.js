@@ -22,6 +22,12 @@ const user = sqliteTable('user', {
 	// blockImages: 1 = remote images in emails are blocked (default).
 	// disableLinks: 1 = links in emails render as plain text (default 0).
 	blockImages: integer('block_images').default(1).notNull(),
-	disableLinks: integer('disable_links').default(0).notNull()
+	disableLinks: integer('disable_links').default(0).notNull(),
+	// Two-factor authentication (TOTP, per user, off by default).
+	// totpSecret holds the AES-GCM-encrypted base32 secret (empty = none);
+	// totpBackupCodes holds a JSON array of salted SHA-256 hashes.
+	totpSecret: text('totp_secret').default('').notNull(),
+	totpEnabled: integer('totp_enabled').default(0).notNull(),
+	totpBackupCodes: text('totp_backup_codes').default('').notNull()
 });
 export default user

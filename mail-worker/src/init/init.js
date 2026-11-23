@@ -26,6 +26,7 @@ const dbInit = {
 		await this.v3_6DB(c);
 		await this.v3_7DB(c);
 		await this.v3_8DB(c);
+		await this.v3_9DB(c);
 		await userService.initAdmin(c);
 		await settingService.refresh(c);
 		return c.text('success');
@@ -72,6 +73,22 @@ const dbInit = {
 			await c.env.db.batch([
 				c.env.db.prepare(`ALTER TABLE user ADD COLUMN block_images INTEGER NOT NULL DEFAULT 1;`),
 				c.env.db.prepare(`ALTER TABLE user ADD COLUMN disable_links INTEGER NOT NULL DEFAULT 0;`)
+			]);
+		} catch (e) {
+			console.warn(`sql skip:${e.message}`);
+		}
+	},
+
+	async v3_9DB(c) {
+		// Per-user TOTP two-factor authentication (user Settings, NOT
+		// System Settings). All three columns default to off/empty.
+		// Idempotent: the ALTER fails harmlessly on databases that
+		// already have the columns.
+		try {
+			await c.env.db.batch([
+				c.env.db.prepare(`ALTER TABLE user ADD COLUMN totp_secret TEXT NOT NULL DEFAULT '';`),
+				c.env.db.prepare(`ALTER TABLE user ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0;`),
+				c.env.db.prepare(`ALTER TABLE user ADD COLUMN totp_backup_codes TEXT NOT NULL DEFAULT '';`)
 			]);
 		} catch (e) {
 			console.warn(`sql skip:${e.message}`);
