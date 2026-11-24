@@ -25,6 +25,11 @@ export const email = sqliteTable('email', {
 	message: text('message'),
 	unread: integer('unread').default(0).notNull(),
 	createTime: text('create_time').default(sql`CURRENT_TIMESTAMP`).notNull(),
+	// Two-way state sync: when this row's read/delete state last changed.
+	// New mail starts at its arrival time (DB default); mark-read,
+	// delete, restore and reportSpam stamp it on every change, and the
+	// sync worker's state pass lists rows by (update_time, email_id).
+	updateTime: text('update_time').default(sql`CURRENT_TIMESTAMP`).notNull(),
 	isDel: integer('is_del').default(0).notNull()
 });
 export default email
