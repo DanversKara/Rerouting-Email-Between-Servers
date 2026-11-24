@@ -1,0 +1,11 @@
+[Unit]
+Description=Hourly update check for the mail mirror
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=1h
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
