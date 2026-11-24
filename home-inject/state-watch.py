@@ -1,53 +1,57 @@
 #!/usr/bin/env python3
-"""Home-to-backup mail state watcher.
+"""Home-to-backup mirror watcher.
 
-Polls Dovecot (via doveadm in the mailstore container) every few
-minutes and reports read/delete transitions to the Cloudflare sync
-worker, which forwards them to the backup webmail with its admin
-login. That is the home-to-backup half of the two-way state sync:
-the backup and home inboxes keep the same read/unread and Trash
-state.
+Polls Dovecot (via doveadm in the mailstore container) every 10 seconds
+and tells the Cloudflare sync worker about everything a user did at home
+(in plMail) that the backup has to mirror:
 
-What is reported (only transitions, only these two):
-  - an INBOX message gains \\Seen  -> {"read": true}
-  - a message appears in Trash    -> {"deleted": true}
-    (a message that arrives in Trash already-read reports both)
+State (POST <SYNC_WORKER_URL>/state):
+  - a message gains \\Seen               -> {"read": true}
+  - a message loses \\Seen (marked unread) -> {"read": false}
+  - a message moves INBOX -> Trash       -> {"deleted": true}
+  - a message moves Trash -> INBOX       -> {"restored": true}
 
-What is NEVER reported:
-  - a message disappearing from Trash (expunge stays local — the
-    backup Trash copy is the last copy),
-  - a message vanishing from INBOX without appearing in Trash
-    (it may have been moved to another folder, not deleted),
-  - a message losing \\Seen (un-read at home stays local).
+Content (POST <SYNC_WORKER_URL>/import):
+  - a new message in Sent (the user sent mail from plMail)
+        -> kind "send": the backup files it in the user's Sent list
+  - a new message in INBOX the backup has never seen (mail that reached
+    home without passing through the backup)
+        -> kind "receive"
+  Each import first asks with just the Message-ID; the message itself is
+  only uploaded when the backup answers "need_raw", so mail that came
+  from the backup in the first place costs one small request.
 
-The watcher never deletes home mail, never moves mail, and never
-asks the backup for mail: it only POSTs state deltas to the sync
-worker (POST /state, authenticated with the same MAIL_INJECT_TOKEN
-the sync worker already sends to mail-inject as SYNC_TOKEN).
+What is deliberately NOT reported:
+  - a message disappearing from Trash (emptying Trash at home is local;
+    the backup Trash copy stays until the user empties it there too),
+  - a message vanishing from INBOX without appearing in Trash (moved to
+    another folder, not deleted).
 
-State is kept in a local JSON file (STATE_FILE): {user: {messageId:
-{"folder": "INBOX"|"Trash", "read": bool}}}. The file is only
-rewritten after every report in a poll succeeds, so a failed POST
-is re-detected and retried on the next poll instead of being lost.
+The first time a user is seen (or the first time Sent is watched) the
+current contents are recorded as the baseline and NOT imported, so
+installing or upgrading this never floods the backup with old mail.
+
+State is kept in STATE_FILE and updated per message as each report
+succeeds, so a failed report is simply re-detected on the next poll.
 
 Standard library only: no third-party packages, no pip install.
 
 Configuration (environment, same file as mail-inject:
  /opt/mail-inject/mail-inject.env):
   MAIL_INJECT_TOKEN  required. Same value as the sync worker's
-                     SYNC_TOKEN secret. Checked by the sync worker
-                     with a constant-time compare.
+                     SYNC_TOKEN secret.
   MAIL_INJECT_USERS  required. Comma-separated allowlist, same as
                      mail-inject. Only these users are watched.
-  MAILSTORE_CONTAINER  Dovecot (mailstore) container, default
-                     plmail-mail-server-mailstore-1.
-  MAIL_TRASH_FOLDER  home Trash folder name as Dovecot sees it,
-                     default "Trash".
   SYNC_WORKER_URL    required. Public URL of the sync worker, e.g.
-                     https://cloud-mail-sync.soarespaulv.workers.dev
-                     (no trailing slash). Reports go to <url>/state.
+                     https://cloud-mail-sync.<you>.workers.dev
+                     (no trailing slash).
+  MAILSTORE_CONTAINER  default plmail-mail-server-mailstore-1.
+  MAIL_TRASH_FOLDER  default "Trash".
+  MAIL_SENT_FOLDER   default "Sent".
   STATE_FILE         default /opt/mail-inject/state-watch.json.
-  POLL_SECONDS       default 60 (1 minute).
+  POLL_SECONDS       default 10 (minimum 5).
+  IMPORT_INBOX       default 1. Set 0 to stop importing INBOX mail that
+                     did not come through the backup.
 """
 
 import json
@@ -62,6 +66,7 @@ import urllib.request
 
 MAILSTORE_CONTAINER = os.environ.get("MAILSTORE_CONTAINER", "plmail-mail-server-mailstore-1").strip()
 MAIL_TRASH_FOLDER = os.environ.get("MAIL_TRASH_FOLDER", "Trash").strip()
+MAIL_SENT_FOLDER = os.environ.get("MAIL_SENT_FOLDER", "Sent").strip()
 TOKEN = os.environ.get("MAIL_INJECT_TOKEN", "")
 USERS = {
     u.strip().lower()
@@ -70,54 +75,52 @@ USERS = {
 }
 SYNC_WORKER_URL = os.environ.get("SYNC_WORKER_URL", "").rstrip("/")
 STATE_FILE = os.environ.get("STATE_FILE", "/opt/mail-inject/state-watch.json")
+IMPORT_INBOX = os.environ.get("IMPORT_INBOX", "1").strip() not in ("0", "false", "no")
+MAX_RAW_BYTES = 25 * 1024 * 1024
 try:
-    POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "60"))
+    POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "10"))
 except ValueError:
-    POLL_SECONDS = 60
-if POLL_SECONDS < 60:
-    POLL_SECONDS = 60
+    POLL_SECONDS = 10
+if POLL_SECONDS < 5:
+    POLL_SECONDS = 5
+
+STATE_VERSION = 2
 
 
 def log(msg):
     print(msg, flush=True)
 
 
-def run_doveadm(args, timeout=120):
+# ---------------------------------------------------------------------------
+# Dovecot
+# ---------------------------------------------------------------------------
+
+def run_doveadm(args, timeout=120, raw=False):
     """Run doveadm in the mailstore container. Returns (ok, stdout, detail)."""
     if not MAILSTORE_CONTAINER or not shutil.which("docker"):
-        return False, "", "doveadm unavailable (no docker or no mailstore container)"
+        return False, b"" if raw else "", "doveadm unavailable (no docker or no mailstore container)"
     cmd = ["docker", "exec", MAILSTORE_CONTAINER, "doveadm"] + args
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return False, "", "doveadm timed out"
+        return False, b"" if raw else "", "doveadm timed out"
     except Exception as e:  # noqa: BLE001 - report anything, never crash the poll
-        return False, "", "doveadm error: %s" % (e,)
+        return False, b"" if raw else "", "doveadm error: %s" % (e,)
     if proc.returncode != 0:
         err = (proc.stderr or b"").decode("utf-8", "replace").strip()[:300]
-        return False, "", "doveadm exited %d: %s" % (proc.returncode, err)
-    return True, (proc.stdout or b"").decode("utf-8", "replace"), "ok"
+        return False, b"" if raw else "", "doveadm exited %d: %s" % (proc.returncode, err)
+    out = proc.stdout or b""
+    return True, out if raw else out.decode("utf-8", "replace"), "ok"
 
 
 def parse_fetch_output(out):
     """Parse `doveadm fetch 'uid flags hdr.message-id'` output.
 
-    Real doveadm output is one `key: value` field per line, with a
-    blank line between messages, e.g.
-        uid: 12
-        flags: \\Seen
-        hdr.message-id: <abc@example.com>
-
-        uid: 13
-        flags:
-        hdr.message-id: <def@example.com>
-    (A field may also use `=` instead of `:`; that form is accepted
-    defensively.) Blocks without a Message-ID or uid are skipped
-    (nothing to match them against). Returns
+    One `key: value` field per line, a blank (or form-feed) line between
+    messages. Blocks without a Message-ID or uid are skipped. Returns
     {messageId: {"uid": str, "read": bool}}.
     """
     result = {}
-    # Group lines into per-message blocks on blank lines.
     blocks = []
     current = []
     for line in out.splitlines():
@@ -145,10 +148,7 @@ def parse_fetch_output(out):
 
 
 def fetch_folder(user, mailbox):
-    """Current {messageId: {uid, read}} for one folder.
-
-    Returns (ok, mapping, detail).
-    """
+    """Current {messageId: {uid, read}} for one folder. Returns (ok, mapping, detail)."""
     ok, out, detail = run_doveadm([
         "fetch", "-u", user, "uid flags hdr.message-id",
         "mailbox", mailbox,
@@ -158,26 +158,48 @@ def fetch_folder(user, mailbox):
     return True, parse_fetch_output(out), "ok"
 
 
-def post_report(message_id, read, deleted):
-    """POST one state delta to the sync worker. Returns (ok, detail)."""
-    body = {"syncToken": TOKEN, "messageId": message_id}
-    if read is not None:
-        body["read"] = read
-    if deleted:
-        body["deleted"] = True
+def fetch_raw(user, mailbox, uid):
+    """The full message (headers + body) by UID. Returns (ok, bytes, detail).
+
+    `doveadm -f pager fetch text` prints `text:` on the first line and
+    the message after it, then a form feed; both are stripped.
+    """
+    ok, out, detail = run_doveadm([
+        "-f", "pager", "fetch", "-u", user, "text",
+        "mailbox", mailbox, "uid", str(uid),
+    ], raw=True)
+    if not ok:
+        return False, b"", detail
+    if out.startswith(b"text:"):
+        out = out[len(b"text:"):]
+        if out.startswith(b"\r\n"):
+            out = out[2:]
+        elif out.startswith(b"\n") or out.startswith(b" "):
+            out = out[1:]
+    out = out.rstrip(b"\f\r\n")
+    if not out:
+        return False, b"", "empty message"
+    if len(out) > MAX_RAW_BYTES:
+        return False, b"", "message too large to upload"
+    return True, out + b"\r\n", "ok"
+
+
+# ---------------------------------------------------------------------------
+# Sync worker
+# ---------------------------------------------------------------------------
+
+def post_json(path, body, timeout=30):
+    """POST to the sync worker. Returns (ok, data_or_detail)."""
     req = urllib.request.Request(
-        SYNC_WORKER_URL + "/state",
+        SYNC_WORKER_URL + path,
         data=json.dumps(body).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
-        # Include the server's own detail: the sync worker and
-        # mail-inject both answer 403 "bad token", so the detail is
-        # what tells them apart in the journal.
         detail = ""
         try:
             err_data = json.loads(e.read().decode("utf-8") or "{}")
@@ -188,20 +210,71 @@ def post_report(message_id, read, deleted):
         return False, "HTTP %d%s" % (e.code, detail)
     except Exception as e:  # noqa: BLE001
         return False, "post failed: %s" % (e,)
-    if not isinstance(data, dict) or data.get("status") in ("error",):
+    if not isinstance(data, dict) or data.get("status") == "error":
         return False, "worker refused: %s" % (data.get("detail", "?") if isinstance(data, dict) else "?")
-    return True, "ok"
+    return True, data
 
+
+def report_state(user, message_id, read=None, deleted=False, restored=False):
+    body = {"syncToken": TOKEN, "user": user, "messageId": message_id}
+    if read is not None:
+        body["read"] = read
+    if deleted:
+        body["deleted"] = True
+    if restored:
+        body["restored"] = True
+    ok, data = post_json("/state", body)
+    return ok, (data if not ok else "ok")
+
+
+def import_message(user, kind, mailbox, message_id, uid, read):
+    """Make sure the backup has this message. Returns (ok, detail)."""
+    base = {"syncToken": TOKEN, "user": user, "kind": kind, "messageId": message_id, "read": bool(read)}
+    ok, data = post_json("/import", base)
+    if not ok:
+        return False, data
+    status = data.get("status")
+    if status != "need_raw":
+        return True, status or "ok"
+    ok, raw, detail = fetch_raw(user, mailbox, uid)
+    if not ok:
+        if detail == "message too large to upload":
+            log("watch: user=%s %s import skipped (%s)" % (user, kind, detail))
+            return True, "too large"
+        return False, detail
+    body = dict(base)
+    body["rawMime"] = raw.decode("utf-8", "replace")
+    ok, data = post_json("/import", body, timeout=120)
+    if not ok:
+        return False, data
+    return True, data.get("status") or "ok"
+
+
+# ---------------------------------------------------------------------------
+# State file
+# ---------------------------------------------------------------------------
 
 def load_state():
+    """{"v": 2, "users": {user: {"msgs": {...}, "sent": {...}}}}.
+
+    Version-1 files ({user: {messageId: {folder, read}}}) are upgraded in
+    place: their messages become the INBOX/Trash baseline, and Sent gets
+    its own baseline on the first poll.
+    """
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if isinstance(data, dict):
-            return data
     except (OSError, ValueError):
-        pass
-    return {}
+        data = None
+    if not isinstance(data, dict):
+        return {"v": STATE_VERSION, "users": {}}
+    if data.get("v") == STATE_VERSION and isinstance(data.get("users"), dict):
+        return data
+    users = {}
+    for user, msgs in data.items():
+        if isinstance(msgs, dict):
+            users[user] = {"msgs": msgs}
+    return {"v": STATE_VERSION, "users": users}
 
 
 def save_state(state):
@@ -211,73 +284,108 @@ def save_state(state):
     os.replace(tmp, STATE_FILE)
 
 
-def poll_user(user, prev):
-    """One poll for one user. Returns (new_state, ok).
+# ---------------------------------------------------------------------------
+# One poll
+# ---------------------------------------------------------------------------
 
-    `prev` is {messageId: {"folder", "read"}} from the state file.
-    Reports are sent first; the new state is only returned for
-    saving when every report succeeded, so a failed report is
-    re-detected on the next poll.
-    """
+def poll_user(user, prev_user):
+    """One poll for one user. Returns (new_user_state, all_ok)."""
+    prev_msgs = prev_user.get("msgs")
+    first_inbox = not isinstance(prev_msgs, dict)
+    prev_msgs = prev_msgs if isinstance(prev_msgs, dict) else {}
+    prev_sent = prev_user.get("sent")
+    first_sent = not isinstance(prev_sent, dict)
+    prev_sent = prev_sent if isinstance(prev_sent, dict) else {}
+
     current = {}
     for mailbox in ("INBOX", MAIL_TRASH_FOLDER):
         ok, mapping, detail = fetch_folder(user, mailbox)
         if not ok:
             log("watch: user=%s fetch %s FAILED %s" % (user, mailbox, detail))
-            return prev, False
+            return prev_user, False
         for message_id, info in mapping.items():
-            # A message cannot be in two folders; INBOX wins if a
-            # move is mid-flight between the two fetches.
+            # INBOX wins if a move is mid-flight between the two fetches.
             if message_id not in current:
-                current[message_id] = {"folder": mailbox, "read": info["read"]}
+                current[message_id] = {"folder": mailbox, "read": info["read"], "uid": info["uid"]}
 
-    reports = []
+    all_ok = True
+    new_msgs = {}
     for message_id, info in current.items():
-        old = prev.get(message_id)
+        now_state = {"folder": info["folder"], "read": info["read"]}
+        old = prev_msgs.get(message_id)
+        ok = True
         if old is None:
-            # New to the watcher: report only if it is already read
-            # or already in Trash; unread inbox mail needs nothing.
-            if info["folder"] == MAIL_TRASH_FOLDER:
-                reports.append((message_id, info["read"] or None, True))
+            if first_inbox:
+                # Baseline: converge state only (the backup treats an
+                # unchanged state as a no-op), never import.
+                if info["folder"] == MAIL_TRASH_FOLDER:
+                    ok, detail = report_state(user, message_id, read=True if info["read"] else None, deleted=True)
+                elif info["read"]:
+                    ok, detail = report_state(user, message_id, read=True)
+            elif info["folder"] == "INBOX" and IMPORT_INBOX:
+                ok, detail = import_message(user, "receive", "INBOX", message_id, info["uid"], info["read"])
+                if ok and info["read"]:
+                    ok, detail = report_state(user, message_id, read=True)
+            elif info["folder"] == MAIL_TRASH_FOLDER:
+                ok, detail = report_state(user, message_id, read=True if info["read"] else None, deleted=True)
             elif info["read"]:
-                reports.append((message_id, True, False))
-            continue
-        if old.get("folder") == "INBOX" and info["folder"] == MAIL_TRASH_FOLDER:
-            # Moved to Trash: report the delete (and the read, if it
-            # gained \\Seen in the same interval).
-            read = True if info["read"] and not old.get("read") else None
-            reports.append((message_id, read, True))
-        elif old.get("folder") == "INBOX" and info["folder"] == "INBOX":
-            if info["read"] and not old.get("read"):
-                reports.append((message_id, True, False))
-        # Anything else (read -> unread, Trash -> gone, INBOX -> gone)
-        # is deliberately silent: see the module docstring.
+                ok, detail = report_state(user, message_id, read=True)
+        else:
+            moved_to_trash = old.get("folder") == "INBOX" and info["folder"] == MAIL_TRASH_FOLDER
+            restored = old.get("folder") == MAIL_TRASH_FOLDER and info["folder"] == "INBOX"
+            read_changed = bool(old.get("read")) != info["read"]
+            if moved_to_trash or restored or read_changed:
+                ok, detail = report_state(
+                    user, message_id,
+                    read=info["read"] if read_changed else None,
+                    deleted=moved_to_trash,
+                    restored=restored,
+                )
+        if ok:
+            new_msgs[message_id] = now_state
+        else:
+            all_ok = False
+            log("watch: user=%s report %s FAILED %s" % (user, message_id, detail))
+            if old is not None:
+                new_msgs[message_id] = old  # re-detected next poll
+    # Messages gone from INBOX/Trash (expunged, or moved to another
+    # folder) simply drop out of the state: deliberately silent.
 
-    for message_id, read, deleted in reports:
-        ok, detail = post_report(message_id, read, deleted)
-        if not ok:
-            log("watch: user=%s report FAILED %s" % (user, detail))
-            return prev, False
-    return current, True
+    new_sent = dict(prev_sent)
+    ok, sent_now, detail = fetch_folder(user, MAIL_SENT_FOLDER)
+    if not ok:
+        log("watch: user=%s fetch %s FAILED %s" % (user, MAIL_SENT_FOLDER, detail))
+        all_ok = False
+    else:
+        new_sent = {}
+        for message_id, info in sent_now.items():
+            if first_sent or message_id in prev_sent:
+                new_sent[message_id] = 1
+                continue
+            ok, detail = import_message(user, "send", MAIL_SENT_FOLDER, message_id, info["uid"], True)
+            if ok:
+                new_sent[message_id] = 1
+                log("watch: user=%s sent %s -> backup: %s" % (user, message_id, detail))
+            else:
+                all_ok = False
+                log("watch: user=%s sent import %s FAILED %s" % (user, message_id, detail))
+
+    return {"msgs": new_msgs, "sent": new_sent}, all_ok
 
 
 def poll_all():
-    """One poll for every allowlisted user. Returns True if all ok."""
     state = load_state()
-    new_state = {}
+    users_state = state.get("users", {})
+    new_users = {}
     all_ok = True
     for user in sorted(USERS):
-        prev = state.get(user, {}) if isinstance(state.get(user), dict) else {}
-        updated, ok = poll_user(user, prev)
-        if ok:
-            new_state[user] = updated
-        else:
-            # Keep the old state for this user so its transitions
-            # are re-detected next poll; other users still converge.
-            new_state[user] = prev
+        prev_user = users_state.get(user) if isinstance(users_state.get(user), dict) else {}
+        updated, ok = poll_user(user, prev_user)
+        new_users[user] = updated
+        if not ok:
             all_ok = False
     try:
-        save_state(new_state)
+        save_state({"v": STATE_VERSION, "users": new_users})
     except OSError as e:
         log("watch: state file save FAILED %s" % (e,))
         return False
@@ -285,16 +393,7 @@ def poll_all():
 
 
 def check_worker_url():
-    """Verify SYNC_WORKER_URL actually points at the sync worker.
-
-    GET / on the sync worker answers 200 with the 'cloud-mail
-    merge-back sync worker' banner. Anything else — a 404 from
-    mail-inject (wrong URL: the watcher would be reporting state to
-    the injection service, which answers the same 403 "bad token"
-    for the missing token/user fields), a tunnel error, a wrong
-    host — means the reports would go nowhere useful. Fail loudly
-    at startup instead of 403ing every minute. Returns (ok, detail).
-    """
+    """Verify SYNC_WORKER_URL actually points at the sync worker."""
     for attempt in range(5):
         try:
             with urllib.request.urlopen(SYNC_WORKER_URL + "/", timeout=15) as resp:
@@ -327,16 +426,16 @@ def main():
         print("SYNC_WORKER_URL check failed (%s): %s; refusing to start."
               % (SYNC_WORKER_URL, detail), file=sys.stderr)
         sys.exit(1)
-    log("state-watch starting (users: %s, poll every %ds, state file: %s)"
-        % (",".join(sorted(USERS)), POLL_SECONDS, STATE_FILE))
+    log("state-watch starting (users: %s, poll every %ds, sent folder: %s, inbox import: %s)"
+        % (",".join(sorted(USERS)), POLL_SECONDS, MAIL_SENT_FOLDER, "on" if IMPORT_INBOX else "off"))
     while True:
+        started = time.monotonic()
         try:
-            ok = poll_all()
-            if not ok:
+            if not poll_all():
                 log("watch: poll had failures; will retry next round")
         except Exception as e:  # noqa: BLE001 - one bad poll must not kill the watcher
             log("watch: poll crashed: %s" % (e,))
-        time.sleep(POLL_SECONDS)
+        time.sleep(max(1.0, POLL_SECONDS - (time.monotonic() - started)))
 
 
 if __name__ == "__main__":

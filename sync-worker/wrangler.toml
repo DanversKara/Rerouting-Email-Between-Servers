@@ -2,6 +2,8 @@ name = "cloud-mail-sync"
 main = "src/index.js"
 compatibility_date = "2025-06-04"
 
+# Backstop only. The backup app wakes this worker the moment anything
+# changes (service binding -> SyncKick), so mail does not wait for this.
 [triggers]
 crons = ["* * * * *"]
 
@@ -11,6 +13,18 @@ id = "fd3fba3eb2ea4f34a29e6f5ff708645b" # SYNC_KV namespace, created in the Clou
 # NOTE: wrangler validates this id on every command (telemetry, kv list,
 # deploy), so it must be a real id — an empty id fails the run before the
 # workflow can fill it in. The workflow build step leaves a real id as-is.
+# KV now only holds the cached admin login token; cursors moved to the
+# SyncRunner Durable Object below (old KV values are read once).
+
+# One Durable Object runs every sync, one at a time, with strongly
+# consistent cursors. SQLite-backed, so it works on the free plan.
+[[durable_objects.bindings]]
+name = "RUNNER"
+class_name = "SyncRunner"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SyncRunner"]
 
 [vars]
 # Public URL of the deployed Cloud Mail app, no trailing slash.
@@ -18,7 +32,8 @@ CLOUDMAIL_URL = ""
 # Health endpoint of the home injection service (see ../home-inject/).
 # Must answer 2xx only when home is ready to take mail.
 HOME_HEALTH_URL = ""
-# Injection endpoint of the home service.
+# Injection endpoint of the home service. /state, /append and /aliases
+# are derived from it (same host, path swapped).
 HOME_INJECT_URL = ""
 # JSON map of Cloud Mail userId -> home inbox address.
 # Example: {"1": "you@bearermail.com", "2": "friend@bearermail.com"}

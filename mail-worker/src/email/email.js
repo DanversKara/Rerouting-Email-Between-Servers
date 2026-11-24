@@ -14,6 +14,7 @@ import telegramService from '../service/telegram-service';
 import aiService from '../service/ai-service';
 import webhookService from '../service/webhook-service';
 import { notifyMailWs } from '../websocket/notify';
+import { kickSync } from '../utils/sync-kick';
 
 // Merge-back: R2 key prefix for the untouched original message bytes.
 // Keep in sync with the same value in api/email-api.js.
@@ -51,12 +52,17 @@ export async function email(message, env, ctx) {
 
 		const reader = message.raw.getReader();
 		let content = '';
+		// One streaming decoder for the whole message: a fresh decoder per
+		// chunk mangled any UTF-8 character that straddled two chunks,
+		// and that damaged copy is what the sync worker carries home.
+		const decoder = new TextDecoder();
 
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
-			content += new TextDecoder().decode(value);
+			content += decoder.decode(value, { stream: true });
 		}
+		content += decoder.decode();
 
 		const email = await PostalMime.parse(content);
 
@@ -196,6 +202,10 @@ export async function email(message, env, ctx) {
 
 		// 有账号才推个人收件箱；无人收件（无 account / userId=0）只推全部邮件。
 		notifyMailWs(env, ctx, emailRow);
+
+		// Merge-back: tell the sync worker now, so the message reaches the
+		// home inbox in seconds instead of at the next cron tick.
+		kickSync(env, ctx, 'receive');
 
 		if (ruleType === settingConst.ruleType.RULE) {
 			if (!emailService.matchForwardRule({

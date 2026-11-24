@@ -34,6 +34,15 @@ existing Cloudflare Tunnel — never directly.
   — nothing is ever moved out of Trash — and a message found nowhere
   is skipped (200 `skipped`), never resurrected or re-sent. Same token
   and allowlist as `/inject`.
+- `POST /append` with JSON `{"token", "user", "rawMime", "folder":
+  "sent", "read"}` — files a copy of mail the user sent **from the
+  backup** in their home Sent folder (`doveadm save -m Sent`), marked
+  read. Skipped (200 `duplicate`) when that Message-ID is already in
+  Sent or Trash. Set `MAIL_SENT_FOLDER` if your Sent folder has another
+  name.
+- `/inject` is idempotent: a Message-ID already in INBOX or Trash is not
+  delivered a second time. `/state` also accepts `"restore": true`
+  (move the Trash copy back to INBOX).
 - `GET /aliases` — every account's live aliases from plMail, keyed by the
   allowlist mailbox address, e.g.
   `{"support@bearermail.com": ["walmart@bearermail.com", ...]}`. Same
@@ -150,20 +159,30 @@ Then set the same hostname in the sync worker's vars
 (`HOME_HEALTH_URL=https://sync.bearermail.com/health`,
 `HOME_INJECT_URL=https://sync.bearermail.com/inject`).
 
-## The state watcher (home → backup)
+## The watcher (home → backup)
 
-`state-watch.py` polls Dovecot every 5 minutes (via `doveadm fetch`
-for `uid`, `flags` and `hdr.message-id` on INBOX + Trash) and reports
-only two transitions to the sync worker (`POST /state`, same token):
-a message gaining `\Seen`, and a message appearing in Trash. It
-never deletes or moves home mail, never asks the backup for mail, and
-never reports a message disappearing from Trash (expunge stays local
-— the backup Trash copy is the last copy) or a message losing
-`\Seen`. It keeps its seen-state in `/opt/mail-inject/
-state-watch.json` and only saves it after every report in a poll
-succeeds, so a failed report is retried next poll. First poll after
-install converges safely: mail already read or already in Trash is
-reported once (the backup treats an unchanged state as a no-op).
+`state-watch.py` polls Dovecot every **10 seconds** (`POLL_SECONDS`,
+minimum 5) and reports to the sync worker:
+
+- read, **un-read**, moved to Trash, **restored** from Trash (`POST /state`)
+- new mail in **Sent** — mail the user sent from plMail — so it shows in
+  the backup's sent list (`POST /import`, kind `send`)
+- new INBOX mail the backup has never seen (`POST /import`, kind
+  `receive`; set `IMPORT_INBOX=0` to turn this off)
+
+Imports ask with the Message-ID first; the message is only uploaded when
+the backup does not have it. The first poll records what is already
+there as a baseline and imports nothing, so upgrading never floods the
+backup with old mail. Expunges from Trash are never reported.
+
+**Upgrading:** copy the new `mail-inject.py` and `state-watch.py` to
+`/opt/mail-inject/` and `systemctl restart mail-inject state-watch`. The
+old state file is upgraded in place.
+
+**plMail tip:** plMail only holds IMAP IDLE on INBOX by default; other
+folders refresh on the account's sync interval (default 15 min). To see
+Trash/Sent changes made in the backup sooner, turn IDLE on for those
+folders in plMail's account folder settings, or lower the sync interval.
 
 ## Test an injection by hand
 

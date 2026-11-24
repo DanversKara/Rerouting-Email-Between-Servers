@@ -15,11 +15,16 @@ ordinary mail.
                 never fails the inject: the sync worker's state pass
                 converges it afterwards.
   POST /state    {"token": ..., "user": ..., "messageId": ...,
-                  "read": true/false, "deleted": true/false}
-                apply a backup-side read/delete state to the home copy:
-                \\Seen on/off, or move the INBOX copy to Trash. Never
-                moves anything out of Trash; a message found nowhere is
+                  "read": true, "deleted": true, "restore": true}
+                apply a backup-side state to the home copy: \\Seen on,
+                move the INBOX copy to Trash, or (restore) move the
+                Trash copy back to INBOX. A message found nowhere is
                 skipped, never resurrected or re-sent.
+  POST /append   {"token": ..., "user": ..., "rawMime": ...,
+                  "folder": "sent", "read": true}
+                file a copy of mail the user SENT from the backup in
+                their home Sent folder (doveadm save), marked read.
+                Skipped when the Message-ID is already in Sent or Trash.
   GET  /health  200 only when an injection path is available
   GET  /aliases  {"support@example.com": ["alias@example.com", ...], ...}
                 every account's live aliases from plMail, keyed by the
@@ -74,6 +79,8 @@ Configuration (environment, see mail-inject.env):
   MAILSTORE_CONTAINER  Dovecot (mailstore) container, default
                      plmail-mail-server-mailstore-1. Used by the doveadm
                      paths: the post-delivery state step and POST /state.
+  MAIL_SENT_FOLDER   home Sent folder name as Dovecot sees it, default
+                     "Sent". Used by POST /append.
   MAIL_TRASH_FOLDER  home Trash folder name as Dovecot sees it, default
                      "Trash". Confirm with:
                      docker exec plmail-mail-server-mailstore-1 doveadm mailbox list -u you@bearermail.com
@@ -101,6 +108,7 @@ SENDMAIL_BIN = os.environ.get("SENDMAIL_BIN", "/usr/sbin/sendmail")
 MTA_CONTAINER = os.environ.get("MTA_CONTAINER", "plmail-mail-server-mta-1").strip()
 MAILSTORE_CONTAINER = os.environ.get("MAILSTORE_CONTAINER", "plmail-mail-server-mailstore-1").strip()
 MAIL_TRASH_FOLDER = os.environ.get("MAIL_TRASH_FOLDER", "Trash").strip()
+MAIL_SENT_FOLDER = os.environ.get("MAIL_SENT_FOLDER", "Sent").strip()
 MAX_BYTES = int(os.environ.get("MAX_BYTES", str(25 * 1024 * 1024)))
 PLMAIL_DB_CONTAINER = os.environ.get("PLMAIL_DB_CONTAINER", "plmail-mail-server-database-1")
 PLMAIL_DB_USER = os.environ.get("PLMAIL_DB_USER", "app")
@@ -230,12 +238,21 @@ def inject(user, raw_bytes, read=False, deleted=False):
     pass converges state afterwards and retries. Only a failed
     sendmail delivery fails the inject.
     """
+    message_id = extract_message_id(raw_bytes)
+    # Idempotent: if this Message-ID is already in the user's INBOX or
+    # Trash (a retry after a lost answer, or two sync runs racing), do
+    # not deliver a second copy — just make its state right. A failed
+    # lookup never blocks delivery.
+    if message_id and already_have(user, message_id, ("INBOX", MAIL_TRASH_FOLDER)):
+        if read or deleted:
+            apply_state(user, message_id, True if read else None, deleted)
+        log("inject: user=%s duplicate, not delivered again" % user)
+        return True, "duplicate"
     ok, detail = inject_sendmail(user, raw_bytes)
     if not ok:
         return False, detail
     if not read and not deleted:
         return True, "ok"
-    message_id = extract_message_id(raw_bytes)
     if not message_id:
         log("inject: user=%s state skipped (no Message-ID)" % user)
         return True, "ok"
@@ -259,14 +276,29 @@ def inject(user, raw_bytes, read=False, deleted=False):
     return True, "ok"
 
 
-def apply_state(user, message_id, read, deleted):
-    """Apply a backup-side read/delete state to the home copy.
+def already_have(user, message_id, mailboxes):
+    """True when a message with this Message-ID is in any of `mailboxes`.
+
+    False when it is not, or when the lookup itself fails (callers then
+    go ahead: a rare duplicate beats a lost message).
+    """
+    for mailbox in mailboxes:
+        ok, uids, _detail = doveadm_search(user, mailbox, message_id)
+        if ok and uids:
+            return True
+    return False
+
+
+def apply_state(user, message_id, read, deleted, restore=False):
+    """Apply a backup-side read/delete/restore state to the home copy.
 
     Returns ("ok"|"skipped"|"failed", detail).
     - read=True adds \\Seen; read=False removes it; read=None leaves flags alone.
     - deleted=True moves the INBOX copy to Trash (the read flag is
-      applied to the Trash copy afterwards); a copy already in Trash
-      stays there — nothing is ever moved OUT of Trash.
+      applied to the Trash copy afterwards).
+    - restore=True (and not deleted) moves the Trash copy back to INBOX:
+      the user restored it in the backup. Only ever sent for a restore
+      made since the sync worker's last pass, never for an old state.
     - Nothing is ever re-sent: a message found nowhere is skipped,
       not resurrected.
     """
@@ -292,6 +324,18 @@ def apply_state(user, message_id, read, deleted):
     if not ok:
         return "failed", detail
     if trash_uids:
+        if restore and not deleted:
+            ok, _out, detail = run_doveadm([
+                "move", "-u", user, "INBOX",
+                "mailbox", MAIL_TRASH_FOLDER, "HEADER", "Message-ID", message_id,
+            ])
+            if not ok:
+                return "failed", detail
+            if read is not None:
+                ok, detail = doveadm_flags(user, "INBOX", message_id, "add" if read else "remove")
+                if not ok:
+                    return "failed", detail
+            return "ok", "restored"
         # Already in Trash: never move it out. Only the read flag may
         # still change on the Trash copy.
         if read is not None:
@@ -334,6 +378,30 @@ def inject_sendmail(user, raw_bytes):
         err = (proc.stderr or b"").decode("utf-8", "replace").strip()[:500]
         return False, "sendmail exited %d: %s" % (proc.returncode, err)
     return True, "ok"
+
+
+def append_sent(user, raw_bytes, read=True):
+    """File a sent message in the user's Sent folder. Returns (result, detail).
+
+    result is "ok", "duplicate" or "failed". `doveadm save` stores the
+    message as-is; \\Seen is added afterwards by Message-ID (doveadm save
+    has no flag option).
+    """
+    message_id = extract_message_id(raw_bytes)
+    if message_id and already_have(user, message_id, (MAIL_SENT_FOLDER, MAIL_TRASH_FOLDER)):
+        return "duplicate", "already in Sent/Trash"
+    ok, _out, detail = run_doveadm(["save", "-u", user, "-m", MAIL_SENT_FOLDER], input_bytes=raw_bytes)
+    if not ok:
+        return "failed", detail
+    if read and message_id:
+        for _attempt in range(3):
+            ok, detail = doveadm_flags(user, MAIL_SENT_FOLDER, message_id, "add")
+            if ok:
+                break
+            time.sleep(1)
+        if not ok:
+            log("append: user=%s stored, but marking read failed (%s)" % (user, detail))
+    return "ok", "ok"
 
 
 # One query for every account's live aliases. The account table is
@@ -463,7 +531,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urlsplit(self.path).path
-        if path not in ("/inject", "/state"):
+        if path not in ("/inject", "/state", "/append"):
             self._json(404, {"status": "not found"})
             return
         payload, err_status, err_detail = self._read_json_body()
@@ -478,6 +546,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/state":
             self._do_state(user, payload)
             return
+        if path == "/append":
+            self._do_append(user, payload)
+            return
 
         raw_mime = payload.get("rawMime", "")
         if not isinstance(raw_mime, str) or not raw_mime:
@@ -490,8 +561,8 @@ class Handler(BaseHTTPRequestHandler):
         raw_bytes = raw_mime.encode("utf-8")
         ok, detail = inject(user, raw_bytes, read=read, deleted=deleted)
         if ok:
-            log("inject: user=%s bytes=%d read=%s deleted=%s ok" % (user, len(raw_bytes), read, deleted))
-            self._json(200, {"status": "ok"})
+            log("inject: user=%s bytes=%d read=%s deleted=%s %s" % (user, len(raw_bytes), read, deleted, detail))
+            self._json(200, {"status": "ok", "detail": detail})
         else:
             log("inject: user=%s bytes=%d read=%s deleted=%s FAILED %s" % (user, len(raw_bytes), read, deleted, detail))
             self._json(502, {"status": "error", "detail": detail})
@@ -508,12 +579,31 @@ class Handler(BaseHTTPRequestHandler):
         # alone" — the sync system never un-reads mail.
         read = True if payload.get("read") is True else None
         deleted = payload.get("deleted") is True
-        result, detail = apply_state(user, message_id, read, deleted)
+        restore = payload.get("restore") is True
+        result, detail = apply_state(user, message_id, read, deleted, restore=restore)
         if result == "failed":
             log("state: user=%s FAILED %s" % (user, detail))
             self._json(502, {"status": "error", "detail": detail})
         else:
-            log("state: user=%s read=%s deleted=%s %s" % (user, read, deleted, result))
+            log("state: user=%s read=%s deleted=%s restore=%s %s" % (user, read, deleted, restore, result))
+            self._json(200, {"status": result, "detail": detail})
+
+    def _do_append(self, user, payload):
+        """POST /append: file mail sent from the backup in home Sent."""
+        raw_mime = payload.get("rawMime", "")
+        if not isinstance(raw_mime, str) or not raw_mime:
+            self._json(400, {"status": "error", "detail": "empty rawMime"})
+            return
+        if payload.get("folder", "sent") != "sent":
+            self._json(400, {"status": "error", "detail": "only folder=sent is supported"})
+            return
+        raw_bytes = raw_mime.encode("utf-8")
+        result, detail = append_sent(user, raw_bytes, read=payload.get("read", True) is not False)
+        if result == "failed":
+            log("append: user=%s bytes=%d FAILED %s" % (user, len(raw_bytes), detail))
+            self._json(502, {"status": "error", "detail": detail})
+        else:
+            log("append: user=%s bytes=%d %s" % (user, len(raw_bytes), result))
             self._json(200, {"status": result, "detail": detail})
 
     def log_message(self, fmt, *args):

@@ -1,6 +1,6 @@
 import orm from '../entity/orm';
 import email from '../entity/email';
-import { emailListColumns, emailBriefColumns, EMAIL_LIST_TEXT_LEN } from '../lib/email-list-columns';
+import { emailListColumns, emailBriefColumns, syncColumns, EMAIL_LIST_TEXT_LEN } from '../lib/email-list-columns';
 import { attConst, emailConst, isDel, settingConst } from '../const/entity-const';
 import { and, desc, eq, gt, inArray, notInArray, lt, count, asc, sql, ne, or, like, lte, gte } from 'drizzle-orm';
 import { star } from '../entity/star';
@@ -28,6 +28,13 @@ import forwardMime from '../utils/forward-mime';
 import verifyUtils from '../utils/verify-utils';
 import { notifyMailWsFromContext } from '../websocket/notify';
 import proxyService from './proxy-service';
+import r2Service from './r2-service';
+import constant from '../const/constant';
+import PostalMime from 'postal-mime';
+
+// Merge-back: R2 key prefix for the original message bytes. Keep in
+// sync with email/email.js and api/email-api.js.
+const RAW_PREFIX = 'raw/';
 
 const emailService = {
 
@@ -419,7 +426,10 @@ const emailService = {
 		if (!emailIdList.length) {
 			return;
 		}
-		await orm(c).update(email).set({ isDel: isDel.NORMAL, updateTime: new Date().toISOString() }).where(
+		// restoreTime marks this as a deliberate restore, which the sync
+		// worker mirrors home (moves the home copy out of Trash).
+		const now = new Date().toISOString();
+		await orm(c).update(email).set({ isDel: isDel.NORMAL, updateTime: now, restoreTime: now }).where(
 			and(
 				eq(email.userId, userId),
 				inArray(email.emailId, emailIdList)))
@@ -770,8 +780,35 @@ const emailService = {
 			const emailResult = await this.saveSentEmail(c, { ...saveParams, receiveEmail });
 			const inboxAddresses = [...receiveEmail, ...sendParams.ccEmail, ...sendParams.bccEmail];
 			const emailRowList = await this.HandleOnSiteEmail(c, inboxAddresses, emailResult, emailResult.attList);
+			await this.copyRawToRows(c, emailResult.emailId, emailRowList);
 			await this.forwardOnSiteEmail(c, emailRowList, { sendParams: { ...sendParams, receiveEmail } });
 			yield { emails: [emailResult] };
+		}
+	},
+
+	// Merge-back: an internal (backup-to-backup) message has no inbound
+	// original, so each recipient's inbox row gets a copy of the
+	// sender's RFC 822 copy. Without it the sync worker had nothing to
+	// carry home and the recipient never saw the mail in plMail.
+	async copyRawToRows(c, sentEmailId, rows) {
+		try {
+			const targets = (rows || []).filter(row => row && row.emailId && row.type === emailConst.type.RECEIVE);
+			if (!targets.length) {
+				return;
+			}
+			const obj = await r2Service.getObj(c, RAW_PREFIX + sentEmailId + '.eml');
+			if (!obj) {
+				return;
+			}
+			const raw = typeof obj === 'string' ? obj : (obj instanceof ArrayBuffer ? new TextDecoder().decode(obj) : await obj.text());
+			for (const row of targets) {
+				await r2Service.putObj(c, RAW_PREFIX + row.emailId + '.eml', raw, {
+					contentType: 'message/rfc822',
+					contentDisposition: `attachment;filename=${row.emailId}.eml`
+				});
+			}
+		} catch (e) {
+			console.error('internal mail: copying the original failed:', e);
 		}
 	},
 
@@ -861,12 +898,45 @@ const emailService = {
 			emailData.inReplyTo = messageId;
 			emailData.relation = messageId;
 		}
+
+		// Merge-back: give every sent message a Message-ID and keep a full
+		// RFC 822 copy (raw/<emailId>.eml, like received mail), so the
+		// sync worker can file it in the user's home Sent folder and the
+		// two sides can recognise it as the same message. Cloudflare's
+		// send returns the real Message-ID; Resend and internal sends do
+		// not, so one is minted. Best effort: a failure here never fails
+		// a send that already went out.
+		emailData.messageId = this.toMessageId(providerId) || this.mintMessageId(sendEmail);
+		let rawMime = '';
+		try {
+			const mimeAttachments = await this.toCloudflareAttachments([...(params.imageDataList || []), ...(attachments || [])]);
+			rawMime = this.buildSentMime({
+				messageId: emailData.messageId,
+				name, sendEmail, subject, text, html,
+				receiveEmail, ccEmail, bccEmail,
+				inReplyTo: sendType === 'reply' ? messageId : '',
+				attachments: mimeAttachments
+			});
+		} catch (e) {
+			console.error('sent copy: building the RFC 822 copy failed:', e);
+		}
 		const deliveredCount = receiveEmail.length + ccEmail.length + bccEmail.length;
 		// No increment here: the quota for this send was already reserved
 		// atomically in send() before the provider call, and the unused
 		// part is released there once the deliveries finish.
 
 		const emailResult = await orm(c).insert(email).values(emailData).returning().get();
+
+		if (rawMime) {
+			try {
+				await r2Service.putObj(c, RAW_PREFIX + emailResult.emailId + '.eml', rawMime, {
+					contentType: 'message/rfc822',
+					contentDisposition: `attachment;filename=${emailResult.emailId}.eml`
+				});
+			} catch (e) {
+				console.error('sent copy: saving the RFC 822 copy failed:', e);
+			}
+		}
 
 		if (imageDataList.length > 0) {
 			await attService.saveArticleAtt(c, imageDataList, userId, accountId, emailResult.emailId);
@@ -892,6 +962,47 @@ const emailService = {
 		}
 
 		return emailResult;
+	},
+
+	// '<id@host>' from a provider id when it is a real Message-ID
+	// (Cloudflare returns one); null for Resend UUIDs and empty ids.
+	toMessageId(providerId) {
+		const value = String(providerId || '').trim().replace(/^<|>$/g, '');
+		if (!value || !value.includes('@') || /[\s<>]/.test(value)) {
+			return null;
+		}
+		return `<${value}>`;
+	},
+
+	mintMessageId(fromAddress) {
+		const host = emailUtils.getDomain(fromAddress || '') || 'cloud-mail.local';
+		return `<cm-${Date.now().toString(36)}-${crypto.randomUUID().replace(/-/g, '')}@${host}>`;
+	},
+
+	// The Sent-folder copy of a message the backup sent: forwardMime's
+	// body plus the headers a stored message needs (Message-ID, Date,
+	// Bcc — a Sent copy keeps Bcc, the wire copy never does).
+	buildSentMime({ messageId, name, sendEmail, subject, text, html, receiveEmail, ccEmail, bccEmail, inReplyTo, attachments }) {
+		const body = forwardMime.build({
+			accountEmail: sendEmail,
+			name,
+			receiveEmail,
+			ccEmail,
+			subject,
+			text,
+			html,
+			attachments,
+			sendType: inReplyTo ? 'reply' : '',
+			messageId: inReplyTo
+		});
+		const extra = [
+			`Message-ID: ${messageId}`,
+			`Date: ${new Date().toUTCString().replace('GMT', '+0000')}`
+		];
+		if (bccEmail && bccEmail.length) {
+			extra.push(`Bcc: ${bccEmail.join(', ')}`);
+		}
+		return extra.join('\r\n') + '\r\n' + body;
 	},
 
 	// 附件已在 Resend 处理器中校验，批量接口为每位收件人构造独立邮件。
@@ -1540,7 +1651,7 @@ const emailService = {
 		// so the emailId tiebreak is what keeps rows from being
 		// skipped. Deleted rows are included on purpose — a delete in
 		// the backup is a state the home copy needs too.
-		const list = await orm(c).select({ ...emailListColumns }).from(email)
+		const list = await orm(c).select({ ...syncColumns }).from(email)
 			.where(and(
 				eq(email.type, emailConst.type.RECEIVE),
 				ne(email.status, emailConst.status.SAVING),
@@ -1556,14 +1667,18 @@ const emailService = {
 		return { list };
 	},
 
-	// Two-way state sync: apply a read/delete state reported from home
-	// (via the sync worker). Admin-only. Only fields whose value
+	// Two-way state sync: apply a state reported from home (via the sync
+	// worker). Admin-only. Home is the source of each report — a read,
+	// an un-read, a move to Trash, or a restore out of Trash made in
+	// plMail — so all four are applied. Only fields whose value
 	// actually differs are written, and updateTime only moves when
-	// something changed — so a state echo can never ping-pong: the
-	// state pass sees no new updateTime and stops. Unknown messageIds
-	// (mail that never came from the backup) are skipped, never an
-	// error. isDel is only ever set TO deleted, never cleared: nothing
-	// here can un-delete or restore mail.
+	// something changed, so a state echo can never ping-pong: the
+	// state pass sees no new updateTime and stops. restoreTime is NOT
+	// stamped here: home already restored its copy, there is nothing
+	// to push back. Scoped to the reporting user when userId is given
+	// (the same Message-ID can sit in two users' inboxes). Unknown
+	// messageIds (mail that never came through the backup) are
+	// skipped, never an error.
 	async applyState(c, params, callerUserId) {
 		const caller = await userService.selectById(c, callerUserId);
 		if (!caller || caller.email !== c.env.admin) {
@@ -1573,22 +1688,210 @@ const emailService = {
 		if (!messageId) {
 			return { status: 'skipped', detail: 'empty messageId' };
 		}
-		const row = await orm(c).select().from(email).where(eq(email.messageId, messageId)).get();
-		if (!row || row.type !== emailConst.type.RECEIVE) {
+		const userId = Number(params.userId) || 0;
+		const conditions = [eq(email.messageId, messageId), eq(email.type, emailConst.type.RECEIVE)];
+		if (userId) {
+			conditions.push(eq(email.userId, userId));
+		}
+		const rows = await orm(c).select({ emailId: email.emailId, unread: email.unread, isDel: email.isDel, status: email.status })
+			.from(email).where(and(...conditions)).all();
+		const live = rows.filter(row => row.status !== emailConst.status.SAVING);
+		if (!live.length) {
 			return { status: 'skipped', detail: 'unknown messageId' };
 		}
-		const set = {};
-		if (typeof params.unread === 'number' && (params.unread === 0 || params.unread === 1) && params.unread !== row.unread) {
-			set.unread = params.unread;
+		const now = new Date().toISOString();
+		const changed = [];
+		for (const row of live) {
+			const set = {};
+			if (typeof params.unread === 'number' && (params.unread === 0 || params.unread === 1) && params.unread !== row.unread) {
+				set.unread = params.unread;
+			}
+			if (params.isDel === 1 && row.isDel !== isDel.DELETE) {
+				set.isDel = isDel.DELETE;
+			}
+			if (params.isDel === 0 && row.isDel === isDel.DELETE) {
+				set.isDel = isDel.NORMAL;
+			}
+			if (!Object.keys(set).length) {
+				continue;
+			}
+			set.updateTime = now;
+			await orm(c).update(email).set(set).where(eq(email.emailId, row.emailId)).run();
+			changed.push(row.emailId);
 		}
-		if (params.isDel === 1 && row.isDel !== isDel.DELETE) {
-			set.isDel = isDel.DELETE;
-		}
-		if (!Object.keys(set).length) {
+		if (!changed.length) {
 			return { status: 'skipped', detail: 'no change' };
 		}
-		set.updateTime = new Date().toISOString();
-		await orm(c).update(email).set(set).where(eq(email.emailId, row.emailId)).run();
+		return { status: 'ok', emailId: changed[0], emailIds: changed };
+	},
+
+	// Merge-back content pass: rows above an emailId cursor, oldest
+	// first. Unlike /allEmail/list this INCLUDES rows still being saved
+	// (status SAVING): the sync worker must see them so it waits for
+	// them instead of moving its cursor past a message that is not
+	// finished yet (that used to lose mail when two arrived at once).
+	// Slim columns only — no bodies, no attachments. Admin-only.
+	async syncList(c, params, callerUserId) {
+		const caller = await userService.selectById(c, callerUserId);
+		if (!caller || caller.email !== c.env.admin) {
+			throw new BizError(t('notAdmin'), 403);
+		}
+		const afterId = Number(params.afterId) || 0;
+		let size = Number(params.size);
+		if (isNaN(size) || size <= 0 || size > 100) {
+			size = 100;
+		}
+		const type = params.type === 'send' ? emailConst.type.SEND : emailConst.type.RECEIVE;
+		const list = await orm(c).select({ ...syncColumns }).from(email)
+			.where(and(eq(email.type, type), gt(email.emailId, afterId)))
+			.orderBy(asc(email.emailId))
+			.limit(size)
+			.all();
+		const maxRow = await orm(c).select({ emailId: email.emailId }).from(email)
+			.where(eq(email.type, type)).orderBy(desc(email.emailId)).limit(1).get();
+		return { list, maxEmailId: maxRow ? maxRow.emailId : 0 };
+	},
+
+	// Home -> backup content. A message that exists in the user's home
+	// mailbox but not here: mail sent from plMail (kind 'send', shows
+	// in Sent) or mail that reached home without passing through the
+	// backup (kind 'receive', shows in the inbox). Admin-only.
+	//
+	// Two steps so home only uploads what is really missing: called
+	// with just {userId, kind, messageId} it answers 'exists' or
+	// 'need_raw'; called again with rawMime it stores the message.
+	// Deduplicated by (userId, type, Message-ID), so a replay or a
+	// message that went backup -> home -> back is stored once. Rows made
+	// here are marked resendEmailId = 'home-import' so the sync worker
+	// never sends them back home.
+	async importMail(c, params, callerUserId) {
+		const caller = await userService.selectById(c, callerUserId);
+		if (!caller || caller.email !== c.env.admin) {
+			throw new BizError(t('notAdmin'), 403);
+		}
+		const userId = Number(params.userId) || 0;
+		const kind = params.kind === 'send' ? 'send' : 'receive';
+		const type = kind === 'send' ? emailConst.type.SEND : emailConst.type.RECEIVE;
+		const messageId = typeof params.messageId === 'string' ? params.messageId.trim() : '';
+		if (!userId || !messageId) {
+			return { status: 'skipped', detail: 'userId and messageId are required' };
+		}
+		const existing = await orm(c).select({ emailId: email.emailId }).from(email)
+			.where(and(eq(email.userId, userId), eq(email.type, type), eq(email.messageId, messageId)))
+			.limit(1).get();
+		if (existing) {
+			return { status: 'exists', emailId: existing.emailId };
+		}
+		// A message the user sent to themselves: the sent copy exists
+		// and the inbound copy is what is being asked about (or the
+		// reverse) — still a distinct row, so no cross-type match.
+		const rawMime = typeof params.rawMime === 'string' ? params.rawMime : '';
+		if (!rawMime) {
+			return { status: 'need_raw' };
+		}
+
+		const userRow = await userService.selectById(c, userId);
+		if (!userRow) {
+			return { status: 'skipped', detail: 'unknown userId' };
+		}
+		const parsed = await PostalMime.parse(rawMime);
+		const parsedId = String(parsed.messageId || '').trim();
+		if (parsedId && parsedId !== messageId) {
+			return { status: 'skipped', detail: 'Message-ID in rawMime does not match' };
+		}
+
+		const userAccounts = await orm(c).select().from(account).where(eq(account.userId, userId)).all();
+		const pickAccount = (addresses) => {
+			for (const address of addresses) {
+				const hit = userAccounts.find(row => row.email && address && row.email.toLowerCase() === String(address).toLowerCase());
+				if (hit) {
+					return hit;
+				}
+			}
+			return userAccounts.find(row => row.email && row.email.toLowerCase() === String(userRow.email).toLowerCase())
+				|| userAccounts.slice().sort((a, b) => a.accountId - b.accountId)[0]
+				|| null;
+		};
+		const fromAddress = parsed.from?.address || '';
+		const toList = Array.isArray(parsed.to) ? parsed.to : [];
+		const ownAccount = kind === 'send'
+			? pickAccount([fromAddress])
+			: pickAccount(toList.map(item => item.address));
+		if (!ownAccount) {
+			return { status: 'skipped', detail: 'user has no address in the backup' };
+		}
+
+		let createTime;
+		const parsedDate = parsed.date ? new Date(parsed.date) : null;
+		if (parsedDate && !isNaN(parsedDate.getTime())) {
+			// Same shape and zone as the column default (UTC CURRENT_TIMESTAMP).
+			createTime = parsedDate.toISOString().replace('T', ' ').slice(0, 19);
+		}
+
+		const toEmail = kind === 'send' ? (toList[0]?.address || '') : ownAccount.email;
+		const values = {
+			sendEmail: fromAddress,
+			name: parsed.from?.name || emailUtils.getName(fromAddress),
+			senderEmail: fromAddress,
+			accountId: ownAccount.accountId,
+			userId,
+			subject: parsed.subject || '',
+			text: parsed.text || '',
+			content: parsed.html || '',
+			cc: JSON.stringify(parsed.cc || []),
+			bcc: JSON.stringify(parsed.bcc || []),
+			recipient: JSON.stringify(toList),
+			toEmail,
+			toName: toList.find(item => item.address === toEmail)?.name || '',
+			inReplyTo: parsed.inReplyTo || '',
+			relation: parsed.references || '',
+			messageId,
+			type,
+			status: kind === 'send' ? emailConst.status.SENT : emailConst.status.SAVING,
+			resendEmailId: 'home-import',
+			// Sent mail is read by definition; mail that reached home on
+			// its own is reported as read/unread by the watcher next.
+			unread: kind === 'send' || params.read === true ? emailConst.unread.READ : emailConst.unread.UNREAD,
+			isDel: isDel.NORMAL,
+			updateTime: new Date().toISOString()
+		};
+		if (createTime) {
+			values.createTime = createTime;
+		}
+		let row = await orm(c).insert(email).values(values).returning().get();
+
+		const attachments = [];
+		for (const item of parsed.attachments || []) {
+			const content = item.content;
+			const attachment = {
+				...item,
+				key: constant.ATTACHMENT_PREFIX + await fileUtils.getBuffHash(content) + fileUtils.getExtFileName(item.filename),
+				size: content.length ?? content.byteLength,
+				emailId: row.emailId,
+				userId,
+				accountId: ownAccount.accountId
+			};
+			attachments.push(attachment);
+		}
+		try {
+			if (attachments.length) {
+				await attService.addAtt(c, attachments);
+			}
+		} catch (e) {
+			console.error('import: saving attachments failed:', e);
+		}
+		try {
+			await r2Service.putObj(c, RAW_PREFIX + row.emailId + '.eml', rawMime, {
+				contentType: 'message/rfc822',
+				contentDisposition: `attachment;filename=${row.emailId}.eml`
+			});
+		} catch (e) {
+			console.error('import: saving the original failed:', e);
+		}
+		if (kind === 'receive') {
+			row = await this.completeReceive(c, emailConst.status.RECEIVE, row.emailId);
+			notifyMailWsFromContext(c, row);
+		}
 		return { status: 'ok', emailId: row.emailId };
 	},
 

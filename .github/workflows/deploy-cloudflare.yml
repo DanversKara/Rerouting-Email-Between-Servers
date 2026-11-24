@@ -30,6 +30,11 @@ jobs:
       AI_MODEL: ${{ secrets.AI_MODEL || vars.AI_MODEL || '@cf/meta/llama-3.1-8b-instruct-fast' }}
       EMAIL: ${{ secrets.EMAIL || vars.EMAIL }}
       ANALYSIS_CACHE: ${{ secrets.ANALYSIS_CACHE || vars.ANALYSIS_CACHE || false }}
+      # Name of the merge-back sync worker. The backup wakes it through a
+      # service binding the moment mail arrives or a user reads, deletes,
+      # restores or sends, so home does not wait for the cron. Set the
+      # variable to "none" to deploy without the binding.
+      SYNC_WORKER_NAME: ${{ secrets.SYNC_WORKER_NAME || vars.SYNC_WORKER_NAME || 'cloud-mail-sync' }}
 
 
     outputs:
@@ -115,6 +120,10 @@ jobs:
           [[send_email]]
           name = "email"
           EOF
+          fi
+
+          if [ -n "$SYNC_WORKER_NAME" ] && [ "$SYNC_WORKER_NAME" != "none" ]; then
+            printf '\n[[services]]\nbinding = "sync"\nservice = "%s"\nentrypoint = "SyncKick"\n' "$SYNC_WORKER_NAME" >> "$CONFIG_FILE"
           fi
 
           sed -i "s|\${NAME}|${NAME}|g" "$CONFIG_FILE"

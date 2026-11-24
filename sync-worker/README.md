@@ -7,61 +7,68 @@ Mailjet relay, no per-message forwarding.
 
 ## How it works
 
-Every 5 minutes (cron) — and on a manual `GET /sync` — the worker
-checks the home health URL, then, while home is up, lists every received
-message newer than the last one it processed via the admin
-`/api/allEmail/list` endpoint, fetches each original via the
-`/api/email/raw` endpoint, and POSTs it to the home injection endpoint
-(see `../home-inject/`). Each delivered message id is recorded in KV for
-30 days, so a crash mid-sync can never deliver the same message twice.
-Failures stop that run at the failed message and are retried on the next
-run. Server-down and internet-down look identical from out here, and both
-are handled: while home is down nothing advances and the outage start
-time is recorded in KV for observability only.
+The backup (Cloud Mail) and home (Dovecot + plMail) are kept as mirrors:
 
-Read/unread and Trash state travel with the mail: each list row already
-carries `unread` and `isDel`, so the inject POST includes
-`read`/`deleted` and home stores read mail with `\Seen` and deleted
-mail in the Trash folder. See "State sync" below.
+| What | Direction | How |
+| --- | --- | --- |
+| New inbound mail | backup → home INBOX | content pass, original bytes via `POST /inject` |
+| Mail sent from the backup | backup → home **Sent** | sent pass, stored RFC 822 copy via `POST /append` |
+| Read / delete / restore in the backup | backup → home | state pass via `POST /state` |
+| Read / **un-read** / delete / **restore** in plMail | home → backup | watcher → this worker's `POST /state` |
+| Mail sent from plMail | home Sent → backup sent list | watcher → this worker's `POST /import` (kind `send`) |
+| Mail that reached home without the backup | home INBOX → backup inbox | watcher → `POST /import` (kind `receive`) |
 
-Messages skipped on purpose (logged, not errors):
+Every message keeps one Message-ID on both sides and both sides skip a
+Message-ID they already have, so nothing is ever delivered twice.
 
-- `userId 0` — mail for an unknown recipient that the worker could not
-  place (the noRecipient OPEN limbo case). Unknown mail normally routes
-  to the admin inbox now and syncs home like admin mail.
-- No `USER_MAP` entry for the message's Cloud Mail user id.
-- No stored original (message arrived before the raw-mail patch was
-  deployed). The Cloud Mail copy is kept.
+### Speed
 
-## State sync (two-way read/delete)
+- **Instant trigger.** The backup app wakes this worker the moment mail
+  arrives or a user reads, deletes, restores or sends (service binding
+  `sync` → the `SyncKick` RPC entrypoint, added by the main deploy
+  workflow). The run starts ~1 s later; mail is home in seconds.
+- **Cron every minute** is only a backstop. While home is down the worker
+  re-checks every 30 s so mail moves as soon as home is back.
+- The home watcher polls Dovecot every **10 s**, and its reports are
+  applied to the backup immediately.
 
-The backup and home inboxes keep the same read/unread and Trash state,
-in three parts. **Content still flows one way only, once, via the
-`last_email_id` cursor** — state updates never carry message content
-and never move mail out of Trash, so a delete at home can never make
-the backup re-send anything.
+### One run at a time
 
-- **At sync time.** The inject POST carries `read`/`deleted` (see
-  above); home stores the message accordingly.
-- **Backup → home, after sync.** A second pass each run lists rows
-  whose `update_time` moved after the `last_state_cursor`
-  (`(update_time, email_id)` tuple, so rows sharing one second are
-  never skipped) via the admin `GET /api/email/stateList` endpoint,
-  and POSTs each row's current state to home `POST /state`. A message
-  not home yet is skipped (200 skipped) — the content pass carries
-  the state when it delivers. At most 100 state updates per run.
-  The run summary carries a `stateSync` field
-  (`{status, listed, pushed, skipped, failed}`).
-- **Home → backup.** The docker-host watcher (`../home-inject/
-  state-watch.py`) polls Dovecot and POSTs only read-gained and
-  moved-to-Trash transitions to this worker's `POST /state`
-  (authenticated with `SYNC_TOKEN`, constant-time compare). The
-  worker forwards them to the backup's admin-only
-  `POST /api/email/state` with the cached admin JWT.
+All runs go through one Durable Object (`SyncRunner`, SQLite-backed, so
+it works on the free plan). Cursors live in its storage. They used to
+live in KV, which is eventually consistent and allows only 1,000 writes a
+day on the free plan — a per-minute cron burned through that in hours,
+and after that every run failed until midnight UTC. KV now only caches
+the admin login token. Old KV cursors are read once and migrated.
 
-Limits, by design: restoring a mail from Trash does not mirror to
-the other side, and permanently emptying home Trash leaves the
-backup Trash copy as the last copy.
+### Safety rules
+
+- A message still being saved in the backup is **waited for**, never
+  skipped (before, two messages arriving together could make the cursor
+  jump past one of them, and it never reached home).
+- A message home rejects outright (too large, bad request) is retried 3
+  times, then **parked** (left in the backup, shown in the summary) so it
+  no longer blocks every message behind it. Home being down or erroring
+  still stops the pass.
+- State pushes only send states that are safe to repeat: `read: true`,
+  `deleted: true`, and `restore: true` only for a restore made in the
+  backup since the last pass — an old state can never undo something the
+  user just did at home.
+- An expired admin login (the backup answers HTTP 200 with code 401) now
+  logs in again automatically.
+
+### Endpoints
+
+- `GET /sync` — run now and return the summary. Needs the token:
+  `Authorization: Bearer <SYNC_TOKEN>` or `?token=`. `?last=1` returns
+  the last run's summary without running.
+- `POST /state`, `POST /import` — from the home watcher, `SYNC_TOKEN` in
+  the body.
+
+Not mirrored, by design: emptying Trash (permanent delete stays on the
+side where it happened), and mail in folders other than INBOX / Trash /
+Sent. If the backup's "sync delete" setting is on, deleting in the
+backup erases the row outright and home is never told — leave it off.
 
 ## Alias sync
 
