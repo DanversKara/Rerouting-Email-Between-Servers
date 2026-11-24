@@ -102,23 +102,39 @@ def run_doveadm(args, timeout=120):
 def parse_fetch_output(out):
     """Parse `doveadm fetch 'uid flags hdr.message-id'` output.
 
-    One line per message, space-separated key=value pairs, e.g.
-        uid=12 flags=\\Seen hdr.message-id=<abc@example.com>
-    Flags may hold several values, so the line is split by scanning
-    for the known keys rather than by whitespace. Returns
-    {messageId: {"uid": str, "read": bool}}. Lines without a Message-ID
-    are skipped (nothing to match them against).
+    Real doveadm output is one `key: value` field per line, with a
+    blank line between messages, e.g.
+        uid: 12
+        flags: \\Seen
+        hdr.message-id: <abc@example.com>
+
+        uid: 13
+        flags:
+        hdr.message-id: <def@example.com>
+    (A field may also use `=` instead of `:`; that form is accepted
+    defensively.) Blocks without a Message-ID or uid are skipped
+    (nothing to match them against). Returns
+    {messageId: {"uid": str, "read": bool}}.
     """
     result = {}
+    # Group lines into per-message blocks on blank lines.
+    blocks = []
+    current = []
     for line in out.splitlines():
-        # Find each key=value segment: value runs until the next key.
+        if line.strip() == "":
+            if current:
+                blocks.append(current)
+                current = []
+        else:
+            current.append(line)
+    if current:
+        blocks.append(current)
+    for block in blocks:
         segments = {}
-        for m in re.finditer(r'(uid|flags|hdr\.message-id)=', line):
-            key = m.group(1)
-            start = m.end()
-            nxt = re.search(r'(uid|flags|hdr\.message-id)=', line[start:])
-            end = start + nxt.start() if nxt else len(line)
-            segments[key] = line[start:end].strip()
+        for line in block:
+            m = re.match(r"^(uid|flags|hdr\.message-id)[:=]\s*(.*)$", line.strip())
+            if m:
+                segments[m.group(1)] = m.group(2).strip()
         message_id = segments.get("hdr.message-id", "")
         uid = segments.get("uid", "")
         if not message_id or not uid:
