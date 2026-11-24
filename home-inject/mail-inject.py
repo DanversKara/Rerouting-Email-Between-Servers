@@ -8,9 +8,12 @@ ordinary mail.
 
   POST /inject   {"token": ..., "user": ..., "rawMime": ...,
                   "read": true/false, "deleted": true/false}
-                read mail is stored with \\Seen and deleted mail is
-                stored in the Trash folder, via doveadm save; unread
-                inbox mail keeps the sendmail path.
+                every message is delivered through sendmail first;
+                when read or deleted is set, that state is applied
+                afterwards with the same doveadm search/flags/move
+                machinery POST /state uses. A state step that fails
+                never fails the inject: the sync worker's state pass
+                converges it afterwards.
   POST /state    {"token": ..., "user": ..., "messageId": ...,
                   "read": true/false, "deleted": true/false}
                 apply a backup-side read/delete state to the home copy:
@@ -26,12 +29,13 @@ ordinary mail.
 
 Injection is done by piping the raw message to sendmail inside the plMail
 Postfix (mta) container: `docker exec -i <MTA_CONTAINER> sendmail ...`.
-Read and deleted mail cannot go through sendmail (it cannot set \\Seen
-or choose a folder), so those are stored directly with Dovecot's own
-tool: `docker exec -i <MAILSTORE_CONTAINER> doveadm save -u <user>
--m <mailbox> [-F \\Seen]`. State updates (POST /state) use the same
+There is no doveadm-save delivery path: `doveadm save` has no flag
+option at all (`-F` takes a file of usernames), so it cannot set \\Seen
+and cannot be used to store read mail. Read/deleted state is applied
+after the sendmail delivery with the doveadm machinery in the mailstore
 container: `doveadm search` to find a message by Message-ID, `doveadm
-flags add/remove` for \\Seen, `doveadm move` for INBOX -> Trash.
+flags add/remove` for \\Seen, `doveadm move` for INBOX -> Trash — the
+same machinery POST /state uses.
 The message is piped unchanged, so every original header survives and
 Postfix delivers it to Dovecot exactly as it would a message that arrived
 directly. The only header added is the usual Received: line Postfix adds
@@ -69,7 +73,7 @@ Configuration (environment, see mail-inject.env):
   PLMAIL_DB_NAME     database name, default app. Used only by /aliases.
   MAILSTORE_CONTAINER  Dovecot (mailstore) container, default
                      plmail-mail-server-mailstore-1. Used by the doveadm
-                     paths: read/deleted injects and POST /state.
+                     paths: the post-delivery state step and POST /state.
   MAIL_TRASH_FOLDER  home Trash folder name as Dovecot sees it, default
                      "Trash". Confirm with:
                      docker exec plmail-mail-server-mailstore-1 doveadm mailbox list -u you@bearermail.com
@@ -140,6 +144,24 @@ def extract_from(raw_bytes):
         return None
 
 
+def extract_message_id(raw_bytes):
+    """Best-effort Message-ID from the original Message-ID: header.
+
+    Returned verbatim (angle brackets included), as doveadm_search
+    matches it by substring. None when the header is missing or
+    unparseable: callers skip the state step, they never fail on it.
+    """
+    try:
+        msg = BytesParser(policy=default_policy).parsebytes(raw_bytes)
+        mid = msg.get("Message-ID", "")
+        if not mid:
+            return None
+        mid = str(mid).strip()
+        return mid or None
+    except Exception:
+        return None
+
+
 def run_doveadm(args, input_bytes=None, timeout=120):
     """Run a doveadm command inside the mailstore container.
 
@@ -191,34 +213,37 @@ def doveadm_flags(user, mailbox, message_id, action):
     return ok, detail
 
 
-def inject_doveadm(user, raw_bytes, mailbox, seen):
-    """Store the raw message directly in a Dovecot mailbox, with flags.
-
-    Used when the backup state says read or deleted: sendmail cannot
-    set \\Seen or choose a folder. Returns (ok, detail).
-    """
-    args = ["save", "-u", user, "-m", mailbox]
-    if seen:
-        args += ["-F", "\\Seen"]
-    ok, _out, detail = run_doveadm(args, input_bytes=raw_bytes)
-    return ok, detail
-
-
 def inject(user, raw_bytes, read=False, deleted=False):
     """Deliver the raw message to the user's mailbox. Returns (ok, detail).
 
-    Unread inbox mail takes the exact sendmail path that has always
-    worked. Read mail is stored with \\Seen and deleted mail is stored
-    in the Trash folder (with \\Seen if it was read) via doveadm save.
-    If doveadm is unavailable for a read/deleted case the inject FAILS
-    (the sync worker retries) rather than delivering to the wrong place.
+    Delivery ALWAYS goes through the sendmail path that has always
+    worked. There is no doveadm-save path: `doveadm save` has no flag
+    option at all (`-F` takes a file of usernames), so read/deleted
+    mail used to fail here and block everything behind it.
+    When the backup says the mail is read or deleted, that state is
+    applied AFTER the successful delivery with the same doveadm
+    search/flags/move machinery POST /state uses. A state step that
+    fails or is skipped (e.g. no Message-ID to match on, or the
+    message not visible to doveadm yet) is only logged: the inject
+    itself still succeeds, because the sync worker's separate state
+    pass converges state afterwards and retries. Only a failed
+    sendmail delivery fails the inject.
     """
+    ok, detail = inject_sendmail(user, raw_bytes)
+    if not ok:
+        return False, detail
     if not read and not deleted:
-        return inject_sendmail(user, raw_bytes)
-    if not MAILSTORE_CONTAINER or not shutil.which("docker"):
-        return False, "doveadm unavailable (no docker or no mailstore container)"
-    mailbox = MAIL_TRASH_FOLDER if deleted else "INBOX"
-    return inject_doveadm(user, raw_bytes, mailbox, seen=read)
+        return True, "ok"
+    message_id = extract_message_id(raw_bytes)
+    if not message_id:
+        log("inject: user=%s state skipped (no Message-ID)" % user)
+        return True, "ok"
+    result, state_detail = apply_state(user, message_id, read, deleted)
+    if result == "failed":
+        log("inject: user=%s state failed (%s); delivery already ok" % (user, state_detail))
+    else:
+        log("inject: user=%s state %s read=%s deleted=%s" % (user, result, read, deleted))
+    return True, "ok"
 
 
 def apply_state(user, message_id, read, deleted):
