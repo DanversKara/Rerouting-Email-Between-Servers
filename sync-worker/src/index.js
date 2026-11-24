@@ -25,20 +25,34 @@
 //                    alias sync runs when this is missing or over 3h old
 //   home_down_since  ISO timestamp of when home was last noticed down
 //                    (observability only — it never gates syncing)
+//   last_state_cursor  JSON {"updateTime","emailId"} — highest (update_time,
+//                    email_id) whose read/delete state was pushed home;
+//                    the state pass starts just above it
 //   cloudmail_token  cached admin JWT for the Cloud Mail API
 //   synced:<id>      "1" once a message was delivered home (30 day TTL,
 //                    so a crash mid-sync can never deliver the same
 //                    message twice)
 //
 // Cloud Mail copies are NOT deleted after sync; that stays the user's call.
+//
+// Two-way state sync (see runStatePass and handleStateReport): the
+// backup and home inboxes keep the same read/unread and Trash state.
+// Content still flows one way only, once, via the emailId cursor
+// above — state updates never carry message content and never move
+// mail out of Trash, so a delete at home can never make the backup
+// re-send anything. Home-to-backup reports arrive as POST /state from
+// the docker-host watcher and are forwarded to the backup with the
+// cached admin JWT.
 
 const KV_DOWN_SINCE = 'home_down_since';
 const KV_LAST_ID = 'last_email_id';
+const KV_STATE_CURSOR = 'last_state_cursor';
 const KV_ALIAS_SYNC = 'last_alias_sync';
 const ALIAS_SYNC_INTERVAL_MS = 3 * 60 * 60 * 1000; // 3 hours
 const KV_TOKEN = 'cloudmail_token';
 const SYNCED_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const MAX_PER_RUN = 200; // messages moved per cron run; the rest wait for the next run
+const MAX_STATE_PER_RUN = 100; // state updates pushed home per run
 const FETCH_TIMEOUT_MS = 10000;
 
 export default {
@@ -47,6 +61,9 @@ export default {
 		if (url.pathname === '/sync') {
 			const result = await runSync(env);
 			return Response.json(result);
+		}
+		if (url.pathname === '/state' && request.method === 'POST') {
+			return handleStateReport(env, request);
 		}
 		return new Response('cloud-mail merge-back sync worker\n', { status: 200 });
 	},
@@ -123,6 +140,19 @@ async function runSync(env) {
 		// unchanged in that case.
 		await env.SYNC_KV.put(KV_LAST_ID, String(cursor));
 		summary.lastEmailId = cursor;
+
+		// State pass: push read/delete changes made in the backup after
+		// a message already synced home (or in the minutes before its
+		// sync turn — home treats those as no-ops if the content pass
+		// already carried the state). Independent of the content pass:
+		// a content failure does not block state, and a state failure
+		// never blocks content.
+		try {
+			summary.stateSync = await runStatePass(env, userMap);
+		} catch (e) {
+			console.error('state pass failed:', e);
+			summary.stateSync = { status: 'error', detail: String(e && e.message ? e.message : e) };
+		}
 		return summary;
 	} catch (e) {
 		console.error('sync pass failed:', e);
@@ -435,7 +465,10 @@ async function syncOne(env, row, userMap) {
 	const injectRes = await fetch(env.HOME_INJECT_URL, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
-		body: JSON.stringify({ token: env.SYNC_TOKEN, user: homeUser, rawMime }),
+		// Read/delete state at sync time: the home endpoint stores
+		// read mail with \Seen and deleted mail in the Trash folder.
+		// row.unread / row.isDel are in every full=1 list row.
+		body: JSON.stringify({ token: env.SYNC_TOKEN, user: homeUser, rawMime, read: row.unread === 1, deleted: row.isDel === 1 }),
 		signal: AbortSignal.timeout(60000),
 	});
 	if (!injectRes.ok) {
@@ -445,4 +478,173 @@ async function syncOne(env, row, userMap) {
 
 	await env.SYNC_KV.put(`synced:${row.emailId}`, '1', { expirationTtl: SYNCED_TTL_SECONDS });
 	return 'synced';
+}
+
+// Home state endpoint, derived from the inject URL:
+// https://sync.bearermail.com/inject -> https://sync.bearermail.com/state
+// (one fewer secret to keep in step; the inject URL always ends in /inject).
+function stateUrl(env) {
+	const injectUrl = (env.HOME_INJECT_URL || '').replace(/\/+$/, '');
+	if (!injectUrl.endsWith('/inject')) {
+		return null;
+	}
+	return injectUrl.slice(0, -'/inject'.length) + '/state';
+}
+
+function parseStateCursor(raw) {
+	try {
+		const c = JSON.parse(raw || '');
+		if (c && typeof c.updateTime === 'string' && typeof c.emailId === 'number') {
+			return c;
+		}
+	} catch (e) {
+		// Corrupt cursor: start the sweep over. It is idempotent —
+		// home /state treats already-correct state as a no-op.
+		console.error('state cursor corrupt, restarting sweep:', e);
+	}
+	return { updateTime: '0000-00-00 00:00:00', emailId: 0 };
+}
+
+// Rows whose read/delete state changed after the (updateTime, emailId)
+// cursor, oldest change first, via the admin /email/stateList
+// endpoint. 50 rows a page.
+async function listStateSince(env, cursor) {
+	const params = new URLSearchParams({
+		updateTime: cursor.updateTime,
+		emailId: String(cursor.emailId),
+		size: '50',
+	});
+	const res = await cloudmailFetch(env, `/api/email/stateList?${params.toString()}`, { method: 'GET' });
+	const body = await res.json().catch(() => null);
+	if (!res.ok || !body || body.code !== 200 || !body.data || !Array.isArray(body.data.list)) {
+		throw new Error(`email/stateList failed (HTTP ${res.status})`);
+	}
+	return body.data.list;
+}
+
+// Push post-sync read/delete state home. Lists rows whose updateTime
+// moved after the state cursor, oldest change first, and POSTs each
+// row's current state to home /state. The (updateTime, emailId) tuple
+// cursor is exact even when many rows share one second. A row whose
+// message is not home yet is skipped (home answers 200 skipped): the
+// content pass carries the state when it delivers. A failed row stops
+// the pass so the next run retries it. This pass NEVER sends message
+// content and NEVER moves mail out of Trash — home /state can only set
+// \Seen or move INBOX to Trash.
+async function runStatePass(env, userMap) {
+	const summary = { status: 'ok', listed: 0, pushed: 0, skipped: 0, failed: 0 };
+	const url = stateUrl(env);
+	if (!url) {
+		return { status: 'error', detail: 'cannot derive state URL from HOME_INJECT_URL' };
+	}
+	let cursor = parseStateCursor(await env.SYNC_KV.get(KV_STATE_CURSOR));
+	for (;;) {
+		const page = await listStateSince(env, cursor);
+		summary.listed += page.length;
+		let failed = false;
+		for (const row of page) {
+			if (summary.pushed + summary.skipped + summary.failed >= MAX_STATE_PER_RUN) {
+				break; // cap reached; the rest wait for the next run
+			}
+			if (!row.userId || !userMap[String(row.userId)]) {
+				// Unowned or unmapped: nothing home can do with it.
+				summary.skipped++;
+				cursor = { updateTime: row.updateTime, emailId: row.emailId };
+				continue;
+			}
+			if (!row.messageId) {
+				// No Message-ID stored: home cannot match it. Skip it;
+				// the content pass already carried the state if it
+				// ever delivers.
+				console.log(`state skip emailId ${row.emailId}: no stored Message-ID`);
+				summary.skipped++;
+				cursor = { updateTime: row.updateTime, emailId: row.emailId };
+				continue;
+			}
+			const res = await fetch(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					token: env.SYNC_TOKEN,
+					user: userMap[String(row.userId)],
+					messageId: row.messageId,
+					read: row.unread === 1,
+					deleted: row.isDel === 1,
+				}),
+				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+			});
+			if (!res.ok) {
+				console.error(`state push failed for emailId ${row.emailId} (HTTP ${res.status})`);
+				summary.failed++;
+				failed = true;
+				break;
+			}
+			summary.pushed++;
+			cursor = { updateTime: row.updateTime, emailId: row.emailId };
+		}
+		await env.SYNC_KV.put(KV_STATE_CURSOR, JSON.stringify(cursor));
+		if (failed || page.length < 50 || summary.pushed + summary.skipped + summary.failed >= MAX_STATE_PER_RUN) {
+			break;
+		}
+	}
+	if (summary.failed) {
+		summary.status = 'partial';
+	}
+	return summary;
+}
+
+// Constant-time string compare (the sync worker has no shared crypto
+// helper; this is the same shape as the TOTP service's compare).
+function timingSafeEqual(a, b) {
+	if (typeof a !== 'string' || typeof b !== 'string' || !a.length || a.length !== b.length) {
+		return false;
+	}
+	let diff = 0;
+	for (let i = 0; i < a.length; i++) {
+		diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+	}
+	return diff === 0;
+}
+
+// Home-to-backup state reports, from the docker-host watcher. The
+// caller proves itself with SYNC_TOKEN (the same value as
+// MAIL_INJECT_TOKEN); the state is then applied to the backup with the
+// cached admin JWT, exactly like the alias sync's addForUser calls.
+// The watcher only ever reports read=true and deleted=true; nothing
+// here can un-delete, restore, or re-send mail.
+async function handleStateReport(env, request) {
+	let body;
+	try {
+		body = await request.json();
+	} catch (e) {
+		return Response.json({ status: 'error', detail: 'invalid JSON' }, { status: 400 });
+	}
+	if (!env.SYNC_TOKEN || !timingSafeEqual(body && body.syncToken, env.SYNC_TOKEN)) {
+		return Response.json({ status: 'error', detail: 'bad token' }, { status: 403 });
+	}
+	const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : '';
+	if (!messageId) {
+		return Response.json({ status: 'error', detail: 'empty messageId' }, { status: 400 });
+	}
+	const payload = { messageId };
+	if (typeof body.read === 'boolean') {
+		payload.unread = body.read ? 1 : 0;
+	}
+	if (body.deleted === true) {
+		payload.isDel = 1;
+	}
+	if (payload.unread === undefined && payload.isDel === undefined) {
+		return Response.json({ status: 'skipped', detail: 'nothing to apply' });
+	}
+	const res = await cloudmailFetch(env, '/api/email/state', {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/json' },
+		body: JSON.stringify(payload),
+	});
+	const data = await res.json().catch(() => null);
+	if (!res.ok || !data || data.code !== 200) {
+		console.error(`state report forward failed for ${messageId} (HTTP ${res.status})`);
+		return Response.json({ status: 'error', detail: `email/state HTTP ${res.status}` }, { status: 502 });
+	}
+	return Response.json(data.data || { status: 'ok' });
 }
