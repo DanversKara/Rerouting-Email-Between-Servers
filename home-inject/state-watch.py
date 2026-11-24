@@ -86,6 +86,11 @@ if POLL_SECONDS < 5:
 
 STATE_VERSION = 2
 
+# Cloudflare answers 403 to Python's default "Python-urllib/x.y"
+# User-Agent (bot protection), which is why the watcher could never
+# reach the sync worker. Identify ourselves with an explicit one.
+USER_AGENT = "bearermail-state-watch/2 (+home-inject)"
+
 
 def log(msg):
     print(msg, flush=True)
@@ -193,7 +198,7 @@ def post_json(path, body, timeout=30):
     req = urllib.request.Request(
         SYNC_WORKER_URL + path,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
         method="POST",
     )
     try:
@@ -396,12 +401,15 @@ def check_worker_url():
     """Verify SYNC_WORKER_URL actually points at the sync worker."""
     for attempt in range(5):
         try:
-            with urllib.request.urlopen(SYNC_WORKER_URL + "/", timeout=15) as resp:
+            req = urllib.request.Request(SYNC_WORKER_URL + "/", headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 body = resp.read().decode("utf-8", "replace")
                 if resp.status == 200 and "cloud-mail merge-back sync worker" in body:
                     return True, "ok"
                 return False, "unexpected answer HTTP %d: %s" % (resp.status, body[:120])
         except urllib.error.HTTPError as e:
+            if e.code == 403:
+                return False, "HTTP 403 (blocked by Cloudflare, or not the sync worker — check SYNC_WORKER_URL and any WAF/Bot Fight rules on workers.dev)"
             return False, "HTTP %d (this URL is not the sync worker — check SYNC_WORKER_URL)" % e.code
         except Exception as e:  # noqa: BLE001 - transient network error; retry
             if attempt < 4:
