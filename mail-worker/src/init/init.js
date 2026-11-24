@@ -27,6 +27,7 @@ const dbInit = {
 		await this.v3_7DB(c);
 		await this.v3_8DB(c);
 		await this.v3_9DB(c);
+		await this.v3_10DB(c);
 		await userService.initAdmin(c);
 		await settingService.refresh(c);
 		return c.text('success');
@@ -90,6 +91,32 @@ const dbInit = {
 				c.env.db.prepare(`ALTER TABLE user ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0;`),
 				c.env.db.prepare(`ALTER TABLE user ADD COLUMN totp_backup_codes TEXT NOT NULL DEFAULT '';`)
 			]);
+		} catch (e) {
+			console.warn(`sql skip:${e.message}`);
+		}
+	},
+
+	async v3_10DB(c) {
+		// Two-way mail state sync: track when a row's read/delete state
+		// last changed, so the sync worker can push post-sync state
+		// updates home. update_time defaults to CURRENT_TIMESTAMP, so
+		// new mail starts at its arrival time and existing mail starts
+		// at the migration time; either way the first state sweep
+		// converges home state for mail that synced before this
+		// shipped. No backfill: the (update_time, email_id) tuple
+		// cursor makes the sweep exact even when many rows share one
+		// second, and a backfill UPDATE would be unsafe to re-run
+		// (it could not tell migrated rows from rows whose state
+		// genuinely changed after the migration). Idempotent: the
+		// ALTER and the index creation fail harmlessly on databases
+		// that already have them.
+		try {
+			await c.env.db.prepare(`ALTER TABLE email ADD COLUMN update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP;`).run();
+		} catch (e) {
+			console.warn(`sql skip:${e.message}`);
+		}
+		try {
+			await c.env.db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_update_time ON email(update_time, email_id)`).run();
 		} catch (e) {
 			console.warn(`sql skip:${e.message}`);
 		}
