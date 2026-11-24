@@ -4,6 +4,7 @@ name: 🔁 Deploy cloud-mail sync worker to Cloudflare Workers
 # (deploy-cloudflare.yml) covers mail-worker/ and mail-vue/ and never
 # touches this worker.
 #
+# Runs automatically on a push to main that changes sync-worker/.
 # Manual run: Actions -> "Deploy cloud-mail sync worker" -> Run workflow.
 #
 # Required repo secrets (Settings -> Secrets and variables -> Actions):
@@ -16,6 +17,12 @@ name: 🔁 Deploy cloud-mail sync worker to Cloudflare Workers
 # workflow finds or creates one titled SYNC_KV).
 
 on:
+  # Deploys by itself whenever the sync worker's code changes on main,
+  # like the main mail deploy does. Manual runs still work.
+  push:
+    branches: [ main ]
+    paths:
+      - "sync-worker/**"
   workflow_dispatch:
 
 jobs:

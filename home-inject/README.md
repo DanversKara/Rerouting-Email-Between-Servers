@@ -5,6 +5,30 @@ worker calls to put waiting mail back into the home Dovecot inboxes.
 It listens on localhost only and is reached from the internet through the
 existing Cloudflare Tunnel — never directly.
 
+## Quick setup / update (one command)
+
+On the docker host, as root:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DanversKara/Rerouting-Email-Between-Servers/main/home-inject/install.sh | sh
+```
+
+This installs or updates everything (both services, their systemd units,
+the Sent folders) and turns on an **hourly auto-update**: the home server
+pulls the latest version from the `main` branch by itself and restarts
+only when something changed. The only thing it needs is
+`/opt/mail-inject/mail-inject.env` (token + user list, step 3 below),
+which it never touches. Rebuilt the server? Restore that one file, run
+the command above, done.
+
+Check on it: `systemctl list-timers mail-inject-update.timer` and
+`journalctl -u mail-inject-update -n 20`. Turn auto-update off:
+`systemctl disable --now mail-inject-update.timer`.
+
+Everything else deploys by itself too: a push to `main` that touches
+`mail-worker/` or `mail-vue/` deploys the backup, and one that touches
+`sync-worker/` deploys the sync worker.
+
 ## What it does
 
 - `GET /health` — 200 when an injection path is available, 503 otherwise.

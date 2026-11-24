@@ -1,0 +1,10 @@
+[Unit]
+Description=Update the mail mirror (mail-inject + state-watch) from GitHub
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Re-runs the installer: downloads the latest files from the main branch,
+# installs them, and restarts the services only when something changed.
+ExecStart=/bin/sh /opt/mail-inject/install.sh --quiet
