@@ -47,7 +47,7 @@ Configuration (environment, same file as mail-inject:
                      https://cloud-mail-sync.soarespaulv.workers.dev
                      (no trailing slash). Reports go to <url>/state.
   STATE_FILE         default /opt/mail-inject/state-watch.json.
-  POLL_SECONDS       default 300 (5 minutes).
+  POLL_SECONDS       default 60 (1 minute).
 """
 
 import json
@@ -71,9 +71,9 @@ USERS = {
 SYNC_WORKER_URL = os.environ.get("SYNC_WORKER_URL", "").rstrip("/")
 STATE_FILE = os.environ.get("STATE_FILE", "/opt/mail-inject/state-watch.json")
 try:
-    POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "300"))
+    POLL_SECONDS = int(os.environ.get("POLL_SECONDS", "60"))
 except ValueError:
-    POLL_SECONDS = 300
+    POLL_SECONDS = 60
 if POLL_SECONDS < 60:
     POLL_SECONDS = 60
 
