@@ -99,21 +99,53 @@ const dbInit = {
 	async v3_10DB(c) {
 		// Two-way mail state sync: track when a row's read/delete state
 		// last changed, so the sync worker can push post-sync state
-		// updates home. update_time defaults to CURRENT_TIMESTAMP, so
-		// new mail starts at its arrival time and existing mail starts
-		// at the migration time; either way the first state sweep
-		// converges home state for mail that synced before this
-		// shipped. No backfill: the (update_time, email_id) tuple
-		// cursor makes the sweep exact even when many rows share one
-		// second, and a backfill UPDATE would be unsafe to re-run
+		// updates home. New mail starts at its arrival time and
+		// existing mail starts at the migration time; either way the
+		// first state sweep converges home state for mail that synced
+		// before this shipped. No backfill: the (update_time, email_id)
+		// tuple cursor makes the sweep exact even when many rows share
+		// one second, and a backfill UPDATE would be unsafe to re-run
 		// (it could not tell migrated rows from rows whose state
 		// genuinely changed after the migration). Idempotent: the
 		// ALTER and the index creation fail harmlessly on databases
 		// that already have them.
+		//
+		// Self-verifying: the column's presence is checked after the
+		// ALTER (PRAGMA table_info). Older SQLite rejects a non-constant
+		// DEFAULT in ADD COLUMN, so a failed first attempt is retried
+		// with a constant epoch default. If the column is still missing
+		// after both attempts, this THROWS so init fails loudly and the
+		// deploy goes red — a silently un-migrated database breaks
+		// every email query, because the entity now selects
+		// update_time.
+		const hasUpdateTimeColumn = async () => {
+			try {
+				const res = await c.env.db.prepare(`PRAGMA table_info(email)`).all();
+				const rows = res && Array.isArray(res.results) ? res.results : (Array.isArray(res) ? res : null);
+				if (!rows) {
+					return 'unknown';
+				}
+				return rows.some((row) => row && row.name === 'update_time');
+			} catch (e) {
+				return 'unknown';
+			}
+		};
 		try {
 			await c.env.db.prepare(`ALTER TABLE email ADD COLUMN update_time TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP;`).run();
 		} catch (e) {
 			console.warn(`sql skip:${e.message}`);
+		}
+		let present = await hasUpdateTimeColumn();
+		if (present === false) {
+			try {
+				await c.env.db.prepare(`ALTER TABLE email ADD COLUMN update_time TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z';`).run();
+			} catch (e) {
+				console.warn(`sql skip:${e.message}`);
+			}
+			present = await hasUpdateTimeColumn();
+		}
+		if (present === false) {
+			throw new Error('v3_10DB: update_time column still missing from email table after ALTER attempts; refusing to continue with an un-migrated database');
 		}
 		try {
 			await c.env.db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_update_time ON email(update_time, email_id)`).run();
