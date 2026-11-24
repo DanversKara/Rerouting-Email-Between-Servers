@@ -464,7 +464,9 @@ const emailService = {
 
 	receive(c, params, cidAttList, r2domain) {
 		params.content = this.imgReplace(params.content, cidAttList, r2domain)
-		return orm(c).insert(email).values({ ...params }).returning().get();
+		// Two-way state sync: stamp updateTime explicitly so a new row
+		// never depends on the column default.
+		return orm(c).insert(email).values({ ...params, updateTime: new Date().toISOString() }).returning().get();
 	},
 
 	normalizeAddressList(value) {
