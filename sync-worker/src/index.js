@@ -525,25 +525,42 @@ async function listStateSince(env, cursor) {
 // Push post-sync read/delete state home. Lists rows whose updateTime
 // moved after the state cursor, oldest change first, and POSTs each
 // row's current state to home /state. The (updateTime, emailId) tuple
-// cursor is exact even when many rows share one second. A row whose
-// message is not home yet is skipped (home answers 200 skipped): the
-// content pass carries the state when it delivers. A failed row stops
-// the pass so the next run retries it. This pass NEVER sends message
-// content and NEVER moves mail out of Trash — home /state can only set
-// \Seen or move INBOX to Trash.
+// cursor is exact even when many rows share one second.
+//
+// A row whose message is not home yet (home answers 200 skipped)
+// is NOT consumed: the cursor only advances past it once the content
+// pass has settled that mail — the `synced:` marker exists (it was
+// delivered, so "not found" means the home copy is gone and the
+// state is moot), or its emailId is at/below the content cursor
+// (the content pass skipped it, so it is never coming home) — or
+// once the row is older than STATE_HOLD_MAX_MS (a stuck row must
+// not stall the pass forever). Until one of those holds, the pass
+// stops at that row and the next run retries it from the same
+// cursor, so a read made just before its mail's sync turn is never
+// lost. A failed row stops the pass the same way so the next run
+// retries it. This pass NEVER sends message content and NEVER moves
+// mail out of Trash — home /state can only set \Seen or move INBOX
+// to Trash — and it never un-reads: `read` is only ever sent when
+// true, so an unread backup row leaves the home \Seen flag alone.
+const STATE_HOLD_MAX_MS = 60 * 60 * 1000; // 1 hour
 async function runStatePass(env, userMap) {
-	const summary = { status: 'ok', listed: 0, pushed: 0, skipped: 0, failed: 0 };
+	const summary = { status: 'ok', listed: 0, pushed: 0, skipped: 0, held: 0, failed: 0 };
 	const url = stateUrl(env);
 	if (!url) {
 		return { status: 'error', detail: 'cannot derive state URL from HOME_INJECT_URL' };
 	}
+	// Highest emailId the content pass has settled (synced or
+	// deliberately skipped) in this run. A state row at/below it
+	// will never gain a home copy it does not already have.
+	const contentCursor = Number(await env.SYNC_KV.get(KV_LAST_ID) || '0') || 0;
 	let cursor = parseStateCursor(await env.SYNC_KV.get(KV_STATE_CURSOR));
 	for (;;) {
 		const page = await listStateSince(env, cursor);
 		summary.listed += page.length;
 		let failed = false;
+		let held = false;
 		for (const row of page) {
-			if (summary.pushed + summary.skipped + summary.failed >= MAX_STATE_PER_RUN) {
+			if (summary.pushed + summary.skipped + summary.held + summary.failed >= MAX_STATE_PER_RUN) {
 				break; // cap reached; the rest wait for the next run
 			}
 			if (!row.userId || !userMap[String(row.userId)]) {
@@ -561,16 +578,21 @@ async function runStatePass(env, userMap) {
 				cursor = { updateTime: row.updateTime, emailId: row.emailId };
 				continue;
 			}
+			// Never un-read: only a read backup row sends read=true.
+			// An unread row omits the field, so home leaves \Seen alone.
+			const stateBody = {
+				token: env.SYNC_TOKEN,
+				user: userMap[String(row.userId)],
+				messageId: row.messageId,
+				deleted: row.isDel === 1,
+			};
+			if (row.unread === 1) {
+				stateBody.read = true;
+			}
 			const res = await fetch(url, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify({
-					token: env.SYNC_TOKEN,
-					user: userMap[String(row.userId)],
-					messageId: row.messageId,
-					read: row.unread === 1,
-					deleted: row.isDel === 1,
-				}),
+				body: JSON.stringify(stateBody),
 				signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
 			});
 			if (!res.ok) {
@@ -579,11 +601,32 @@ async function runStatePass(env, userMap) {
 				failed = true;
 				break;
 			}
-			summary.pushed++;
-			cursor = { updateTime: row.updateTime, emailId: row.emailId };
+			const data = await res.json().catch(() => null);
+			const homeStatus = data && typeof data.status === 'string' ? data.status : 'ok';
+			if (homeStatus === 'ok') {
+				summary.pushed++;
+				cursor = { updateTime: row.updateTime, emailId: row.emailId };
+				continue;
+			}
+			// Home says skipped (message not found there). Hold the
+			// cursor unless the content pass has already settled this
+			// mail or the row is old enough to be stuck for good.
+			const delivered = await env.SYNC_KV.get(`synced:${row.emailId}`);
+			const rowAgeMs = Date.now() - Date.parse(row.updateTime);
+			const settled = !!delivered || row.emailId <= contentCursor || !(rowAgeMs >= 0 && rowAgeMs < STATE_HOLD_MAX_MS);
+			if (settled) {
+				console.log(`state skip emailId ${row.emailId}: not home (${data && data.detail ? data.detail : 'not found'}), settled; moving on`);
+				summary.skipped++;
+				cursor = { updateTime: row.updateTime, emailId: row.emailId };
+				continue;
+			}
+			console.log(`state hold emailId ${row.emailId}: not home yet; will retry next run`);
+			summary.held++;
+			held = true;
+			break;
 		}
 		await env.SYNC_KV.put(KV_STATE_CURSOR, JSON.stringify(cursor));
-		if (failed || page.length < 50 || summary.pushed + summary.skipped + summary.failed >= MAX_STATE_PER_RUN) {
+		if (failed || held || page.length < 50 || summary.pushed + summary.skipped + summary.held + summary.failed >= MAX_STATE_PER_RUN) {
 			break;
 		}
 	}
@@ -619,8 +662,9 @@ async function handleStateReport(env, request) {
 	} catch (e) {
 		return Response.json({ status: 'error', detail: 'invalid JSON' }, { status: 400 });
 	}
-	if (!env.SYNC_TOKEN || !timingSafeEqual(body && body.syncToken, env.SYNC_TOKEN)) {
-		return Response.json({ status: 'error', detail: 'bad token' }, { status: 403 });
+	const presented = body && (body.syncToken || body.token);
+	if (!env.SYNC_TOKEN || !timingSafeEqual(presented, env.SYNC_TOKEN)) {
+		return Response.json({ status: 'error', detail: 'bad token (sync-worker /state)' }, { status: 403 });
 	}
 	const messageId = typeof body.messageId === 'string' ? body.messageId.trim() : '';
 	if (!messageId) {
