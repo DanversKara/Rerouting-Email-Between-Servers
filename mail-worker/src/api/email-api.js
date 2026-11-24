@@ -104,3 +104,19 @@ app.get('/email/raw', async (c) => {
 	}
 	return resp;
 })
+
+// Two-way state sync: rows whose read/delete state changed after the
+// cursor. Admin-only (the sync worker calls it with the admin JWT);
+// the service enforces the admin check.
+app.get('/email/stateList', async (c) => {
+	const data = await emailService.stateList(c, c.req.query(), userContext.getUserId(c));
+	return c.json(result.ok(data));
+});
+
+// Two-way state sync: apply a read/delete state reported from home.
+// Admin-only (the sync worker calls it with the admin JWT); the
+// service enforces the admin check and only touches changed fields.
+app.post('/email/state', async (c) => {
+	const data = await emailService.applyState(c, await c.req.json(), userContext.getUserId(c));
+	return c.json(result.ok(data));
+});
