@@ -30,6 +30,12 @@ export const email = sqliteTable('email', {
 	// delete, restore and reportSpam stamp it on every change, and the
 	// sync worker's state pass lists rows by (update_time, email_id).
 	updateTime: text('update_time').default(sql`CURRENT_TIMESTAMP`).notNull(),
+	// Two-way state sync: when the user last restored this row from
+	// Trash in the backup ('' = never). The sync worker's state pass
+	// only moves the home copy out of Trash when this is newer than its
+	// cursor, so an old "not deleted" state can never undo a delete
+	// made at home.
+	restoreTime: text('restore_time').default('').notNull(),
 	isDel: integer('is_del').default(0).notNull()
 });
 export default email

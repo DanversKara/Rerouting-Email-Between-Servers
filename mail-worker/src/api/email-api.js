@@ -6,6 +6,7 @@ import userContext from '../security/user-context';
 import attService from '../service/att-service';
 import BizError from '../error/biz-error';
 import { t } from '../i18n/i18n';
+import { kickSyncFromContext } from '../utils/sync-kick';
 
 // Merge-back: R2 key prefix for the untouched original message bytes.
 // Keep in sync with the same value in email/email.js.
@@ -32,6 +33,7 @@ app.get('/email/unreadCounts', async (c) => {
 
 app.delete('/email/delete', async (c) => {
 	await emailService.delete(c, c.req.query(), userContext.getUserId(c));
+	kickSyncFromContext(c, 'delete');
 	return c.json(result.ok());
 });
 
@@ -41,6 +43,7 @@ app.delete('/email/delete', async (c) => {
 app.post('/email/restore', async (c) => {
 	const { emailIds } = await c.req.json();
 	await emailService.restore(c, { emailIds }, userContext.getUserId(c));
+	kickSyncFromContext(c, 'restore');
 	return c.json(result.ok());
 });
 
@@ -63,6 +66,7 @@ app.delete('/email/emptyTrash', async (c) => {
 app.post('/email/reportSpam', async (c) => {
 	const { emailId } = await c.req.json();
 	const data = await emailService.reportSpam(c, Number(emailId), userContext.getUserId(c));
+	kickSyncFromContext(c, 'reportSpam');
 	return c.json(result.ok(data));
 });
 
@@ -73,11 +77,13 @@ app.get('/email/attList', async (c) => {
 
 app.post('/email/send', async (c) => {
 	const email = await emailService.send(c, await c.req.json(), userContext.getUserId(c));
+	kickSyncFromContext(c, 'send');
 	return c.json(result.ok(email));
 });
 
 app.put('/email/read', async (c) => {
 	await emailService.read(c, await c.req.json(), userContext.getUserId(c));
+	kickSyncFromContext(c, 'read');
 	return c.json(result.ok());
 })
 
@@ -118,5 +124,24 @@ app.get('/email/stateList', async (c) => {
 // service enforces the admin check and only touches changed fields.
 app.post('/email/state', async (c) => {
 	const data = await emailService.applyState(c, await c.req.json(), userContext.getUserId(c));
+	return c.json(result.ok(data));
+});
+
+// Merge-back content pass: received or sent rows above an emailId
+// cursor, oldest first, INCLUDING rows still being saved (status
+// SAVING) so the sync worker can wait for them instead of jumping its
+// cursor past them. Slim columns only. Admin-only (the sync worker
+// calls it with the admin JWT); the service enforces the admin check.
+app.get('/email/syncList', async (c) => {
+	const data = await emailService.syncList(c, c.req.query(), userContext.getUserId(c));
+	return c.json(result.ok(data));
+});
+
+// Home -> backup content: a message that exists at home but not here
+// (mail sent from plMail, or mail delivered straight to home). Called
+// first with just {userId, kind, messageId} to ask whether it is
+// already here, then with rawMime when it is not. Admin-only.
+app.post('/email/import', async (c) => {
+	const data = await emailService.importMail(c, await c.req.json(), userContext.getUserId(c));
 	return c.json(result.ok(data));
 });

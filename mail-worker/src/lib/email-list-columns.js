@@ -18,6 +18,25 @@ function sqlStripWhitespace(column) {
 /** 完整查询：全部字段 */
 export const emailListColumns = getTableColumns(email);
 
+/**
+ * Merge-back sync: just what the sync worker needs to move a message
+ * or its state home. No bodies, no attachments.
+ */
+export const syncColumns = {
+	emailId: email.emailId,
+	userId: email.userId,
+	accountId: email.accountId,
+	type: email.type,
+	status: email.status,
+	unread: email.unread,
+	isDel: email.isDel,
+	messageId: email.messageId,
+	resendEmailId: email.resendEmailId,
+	createTime: email.createTime,
+	updateTime: email.updateTime,
+	restoreTime: email.restoreTime,
+};
+
 /** 摘要查询：列表 + 详情头部；有 text 则不读 content，没有才查 content（去空白），响应里不返回 content */
 export const emailBriefColumns = {
 	emailId: email.emailId,

@@ -28,6 +28,7 @@ const dbInit = {
 		await this.v3_8DB(c);
 		await this.v3_9DB(c);
 		await this.v3_10DB(c);
+		await this.v3_11DB(c);
 		await userService.initAdmin(c);
 		await settingService.refresh(c);
 		return c.text('success');
@@ -149,6 +150,43 @@ const dbInit = {
 		}
 		try {
 			await c.env.db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_update_time ON email(update_time, email_id)`).run();
+		} catch (e) {
+			console.warn(`sql skip:${e.message}`);
+		}
+	},
+
+	async v3_11DB(c) {
+		// Two-way sync, part 2: restore_time records when a row was last
+		// restored from Trash in the backup, so the sync worker can mirror
+		// restores home without ever undoing a delete made at home. A
+		// constant default, so the ALTER works on every SQLite. Plus an
+		// index on message_id: home reports state and new mail by
+		// Message-ID, and those lookups ran as full scans.
+		//
+		// Self-verifying like v3_10DB: the entity selects restore_time,
+		// so a silently missing column would break every email query.
+		const hasColumn = async () => {
+			try {
+				const res = await c.env.db.prepare(`PRAGMA table_info(email)`).all();
+				const rows = res && Array.isArray(res.results) ? res.results : (Array.isArray(res) ? res : null);
+				if (!rows) {
+					return 'unknown';
+				}
+				return rows.some((row) => row && row.name === 'restore_time');
+			} catch (e) {
+				return 'unknown';
+			}
+		};
+		try {
+			await c.env.db.prepare(`ALTER TABLE email ADD COLUMN restore_time TEXT NOT NULL DEFAULT '';`).run();
+		} catch (e) {
+			console.warn(`sql skip:${e.message}`);
+		}
+		if (await hasColumn() === false) {
+			throw new Error('v3_11DB: restore_time column still missing from email table after ALTER; refusing to continue with an un-migrated database');
+		}
+		try {
+			await c.env.db.prepare(`CREATE INDEX IF NOT EXISTS idx_email_message_id ON email(message_id)`).run();
 		} catch (e) {
 			console.warn(`sql skip:${e.message}`);
 		}
