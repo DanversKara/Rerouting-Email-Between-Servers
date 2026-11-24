@@ -404,7 +404,7 @@ const emailService = {
 			return;
 		}
 
-		await orm(c).update(email).set({ isDel: isDel.DELETE, updateTime: sql`CURRENT_TIMESTAMP` }).where(
+		await orm(c).update(email).set({ isDel: isDel.DELETE, updateTime: new Date().toISOString() }).where(
 			and(
 				eq(email.userId, userId),
 				inArray(email.emailId, emailIdList)))
@@ -419,7 +419,7 @@ const emailService = {
 		if (!emailIdList.length) {
 			return;
 		}
-		await orm(c).update(email).set({ isDel: isDel.NORMAL, updateTime: sql`CURRENT_TIMESTAMP` }).where(
+		await orm(c).update(email).set({ isDel: isDel.NORMAL, updateTime: new Date().toISOString() }).where(
 			and(
 				eq(email.userId, userId),
 				inArray(email.emailId, emailIdList)))
@@ -854,7 +854,8 @@ const emailService = {
 			resendEmailId: providerId,
 			recipient: JSON.stringify(receiveEmail.map(address => ({ address, name: '' }))),
 			cc: JSON.stringify(ccEmail.map(address => ({ address, name: '' }))),
-			bcc: JSON.stringify(bccEmail.map(address => ({ address, name: '' })))
+			bcc: JSON.stringify(bccEmail.map(address => ({ address, name: '' }))),
+			updateTime: new Date().toISOString()
 		};
 		if (sendType === 'reply') {
 			emailData.inReplyTo = messageId;
@@ -1137,6 +1138,7 @@ const emailService = {
 
 			//把发件人邮件改成收件
 			const emailValues = {...sendEmailData}
+			emailValues.updateTime = new Date().toISOString();
 			emailValues.bcc = '[]';
 			emailValues.status = emailConst.status.RECEIVE;
 			emailValues.type = emailConst.type.RECEIVE;
@@ -1585,7 +1587,7 @@ const emailService = {
 		if (!Object.keys(set).length) {
 			return { status: 'skipped', detail: 'no change' };
 		}
-		set.updateTime = sql`CURRENT_TIMESTAMP`;
+		set.updateTime = new Date().toISOString();
 		await orm(c).update(email).set(set).where(eq(email.emailId, row.emailId)).run();
 		return { status: 'ok', emailId: row.emailId };
 	},
@@ -1825,17 +1827,18 @@ const emailService = {
 			type: emailConst.type.RECEIVE,
 			status: emailConst.status.RECEIVE,
 			unread: emailConst.unread.UNREAD,
-			isDel: isDel.NORMAL
+			isDel: isDel.NORMAL,
+			updateTime: new Date().toISOString()
 		}).returning().get();
 		notifyMailWsFromContext(c, reportRow);
-		await orm(c).update(email).set({ isDel: isDel.DELETE, updateTime: sql`CURRENT_TIMESTAMP` }).where(
+		await orm(c).update(email).set({ isDel: isDel.DELETE, updateTime: new Date().toISOString() }).where(
 			and(eq(email.userId, userId), eq(email.emailId, emailId))).run();
 		return { reportEmailId: reportRow.emailId };
 	},
 
 	async read(c, params, userId) {
 		const { emailIds } = params;
-		await orm(c).update(email).set({ unread: emailConst.unread.READ, updateTime: sql`CURRENT_TIMESTAMP` }).where(and(eq(email.userId, userId), inArray(email.emailId, emailIds)));
+		await orm(c).update(email).set({ unread: emailConst.unread.READ, updateTime: new Date().toISOString() }).where(and(eq(email.userId, userId), inArray(email.emailId, emailIds)));
 	}
 };
 
