@@ -1,0 +1,19 @@
+[Unit]
+Description=Cloud Mail home-to-backup state watcher
+After=network-online.target docker.service mail-inject.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as root: it needs `docker exec` into the mailstore container.
+# Same env file as mail-inject (it reuses MAIL_INJECT_TOKEN and
+# MAIL_INJECT_USERS), plus SYNC_WORKER_URL for the sync worker.
+User=root
+WorkingDirectory=/opt/mail-inject
+EnvironmentFile=/opt/mail-inject/mail-inject.env
+ExecStart=/usr/bin/python3 /opt/mail-inject/state-watch.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
