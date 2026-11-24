@@ -404,7 +404,7 @@ const emailService = {
 			return;
 		}
 
-		await orm(c).update(email).set({ isDel: isDel.DELETE }).where(
+		await orm(c).update(email).set({ isDel: isDel.DELETE, updateTime: sql`CURRENT_TIMESTAMP` }).where(
 			and(
 				eq(email.userId, userId),
 				inArray(email.emailId, emailIdList)))
@@ -419,7 +419,7 @@ const emailService = {
 		if (!emailIdList.length) {
 			return;
 		}
-		await orm(c).update(email).set({ isDel: isDel.NORMAL }).where(
+		await orm(c).update(email).set({ isDel: isDel.NORMAL, updateTime: sql`CURRENT_TIMESTAMP` }).where(
 			and(
 				eq(email.userId, userId),
 				inArray(email.emailId, emailIdList)))
@@ -1506,6 +1506,88 @@ const emailService = {
 		return { list: list, total: totalRow.total, latestEmail };
 	},
 
+	// Two-way state sync: rows whose read/delete state changed after
+	// the given (updateTime, emailId) cursor, oldest change first.
+	// The sync worker drains this after the content pass and pushes
+	// each row's current state home via POST /state. Admin-only: the
+	// sync worker calls it with the admin JWT, and the service
+	// enforces the admin check like addForUser does.
+	async stateList(c, params, callerUserId) {
+		const caller = await userService.selectById(c, callerUserId);
+		if (!caller || caller.email !== c.env.admin) {
+			throw new BizError(t('notAdmin'), 403);
+		}
+
+		let { updateTime, emailId, size } = params;
+		size = Number(size);
+		emailId = Number(emailId) || 0;
+		if (typeof updateTime !== 'string' || !updateTime) {
+			updateTime = '0000-00-00 00:00:00';
+		}
+		if (isNaN(size) || size <= 0) {
+			size = 50;
+		}
+		if (size > 50) {
+			size = 50;
+		}
+
+		// (updateTime, emailId) tuple cursor: several rows can share
+		// one second (SQLite CURRENT_TIMESTAMP is second-resolution),
+		// so the emailId tiebreak is what keeps rows from being
+		// skipped. Deleted rows are included on purpose — a delete in
+		// the backup is a state the home copy needs too.
+		const list = await orm(c).select({ ...emailListColumns }).from(email)
+			.where(and(
+				eq(email.type, emailConst.type.RECEIVE),
+				ne(email.status, emailConst.status.SAVING),
+				gt(email.userId, 0),
+				or(
+					gt(email.updateTime, updateTime),
+					and(eq(email.updateTime, updateTime), gt(email.emailId, emailId))
+				)
+			))
+			.orderBy(asc(email.updateTime), asc(email.emailId))
+			.limit(size)
+			.all();
+		return { list };
+	},
+
+	// Two-way state sync: apply a read/delete state reported from home
+	// (via the sync worker). Admin-only. Only fields whose value
+	// actually differs are written, and updateTime only moves when
+	// something changed — so a state echo can never ping-pong: the
+	// state pass sees no new updateTime and stops. Unknown messageIds
+	// (mail that never came from the backup) are skipped, never an
+	// error. isDel is only ever set TO deleted, never cleared: nothing
+	// here can un-delete or restore mail.
+	async applyState(c, params, callerUserId) {
+		const caller = await userService.selectById(c, callerUserId);
+		if (!caller || caller.email !== c.env.admin) {
+			throw new BizError(t('notAdmin'), 403);
+		}
+		const messageId = typeof params.messageId === 'string' ? params.messageId.trim() : '';
+		if (!messageId) {
+			return { status: 'skipped', detail: 'empty messageId' };
+		}
+		const row = await orm(c).select().from(email).where(eq(email.messageId, messageId)).get();
+		if (!row || row.type !== emailConst.type.RECEIVE) {
+			return { status: 'skipped', detail: 'unknown messageId' };
+		}
+		const set = {};
+		if (typeof params.unread === 'number' && (params.unread === 0 || params.unread === 1) && params.unread !== row.unread) {
+			set.unread = params.unread;
+		}
+		if (params.isDel === 1 && row.isDel !== isDel.DELETE) {
+			set.isDel = isDel.DELETE;
+		}
+		if (!Object.keys(set).length) {
+			return { status: 'skipped', detail: 'no change' };
+		}
+		set.updateTime = sql`CURRENT_TIMESTAMP`;
+		await orm(c).update(email).set(set).where(eq(email.emailId, row.emailId)).run();
+		return { status: 'ok', emailId: row.emailId };
+	},
+
 	async allEmailLatest(c, params) {
 
 		const { emailId } = params;
@@ -1744,14 +1826,14 @@ const emailService = {
 			isDel: isDel.NORMAL
 		}).returning().get();
 		notifyMailWsFromContext(c, reportRow);
-		await orm(c).update(email).set({ isDel: isDel.DELETE }).where(
+		await orm(c).update(email).set({ isDel: isDel.DELETE, updateTime: sql`CURRENT_TIMESTAMP` }).where(
 			and(eq(email.userId, userId), eq(email.emailId, emailId))).run();
 		return { reportEmailId: reportRow.emailId };
 	},
 
 	async read(c, params, userId) {
 		const { emailIds } = params;
-		await orm(c).update(email).set({ unread: emailConst.unread.READ }).where(and(eq(email.userId, userId), inArray(email.emailId, emailIds)));
+		await orm(c).update(email).set({ unread: emailConst.unread.READ, updateTime: sql`CURRENT_TIMESTAMP` }).where(and(eq(email.userId, userId), inArray(email.emailId, emailIds)));
 	}
 };
 
