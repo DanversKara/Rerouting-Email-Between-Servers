@@ -89,6 +89,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from email.parser import BytesParser
 from email.policy import default as default_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -238,7 +239,19 @@ def inject(user, raw_bytes, read=False, deleted=False):
     if not message_id:
         log("inject: user=%s state skipped (no Message-ID)" % user)
         return True, "ok"
-    result, state_detail = apply_state(user, message_id, read, deleted)
+    # Never un-read: only a read mail passes read=True; an unread
+    # mail passes None so apply_state leaves \Seen alone.
+    result, state_detail = apply_state(user, message_id, True if read else None, deleted)
+    if result == "skipped":
+        # The message may not be visible to doveadm yet (LMTP race:
+        # sendmail accepted it a moment ago, Dovecot hasn't indexed
+        # it). Retry briefly before giving up; the sync worker's
+        # state pass converges anything still missing afterwards.
+        for _attempt in range(4):
+            time.sleep(1)
+            result, state_detail = apply_state(user, message_id, True if read else None, deleted)
+            if result != "skipped":
+                break
     if result == "failed":
         log("inject: user=%s state failed (%s); delivery already ok" % (user, state_detail))
     else:
@@ -402,7 +415,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/aliases":
             if not hmac.compare_digest(self._auth_token(), TOKEN):
                 log("aliases: rejected bad token")
-                self._json(403, {"status": "error", "detail": "bad token"})
+                self._json(403, {"status": "error", "detail": "bad token (mail-inject /aliases)"})
                 return
             ok, result = fetch_aliases()
             if ok:
@@ -442,7 +455,7 @@ class Handler(BaseHTTPRequestHandler):
         user = str(payload.get("user", "")).strip().lower()
         if not isinstance(token, str) or not hmac.compare_digest(token, TOKEN):
             log("rejected bad token")
-            return None, 403, "bad token"
+            return None, 403, "bad token (mail-inject)"
         if not user or user not in USERS:
             log("rejected unknown user %r" % user)
             return None, 403, "unknown user"
@@ -490,11 +503,10 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"status": "error", "detail": "empty messageId"})
             return
         message_id = message_id.strip()
-        # read/deleted are optional: only a real JSON boolean counts.
-        # Absent means "leave that part alone".
-        read = payload.get("read")
-        if read is not True and read is not False:
-            read = None
+        # read/deleted are optional: only a real JSON true counts as
+        # read. An explicit read=false is treated as "leave the flag
+        # alone" — the sync system never un-reads mail.
+        read = True if payload.get("read") is True else None
         deleted = payload.get("deleted") is True
         result, detail = apply_state(user, message_id, read, deleted)
         if result == "failed":
