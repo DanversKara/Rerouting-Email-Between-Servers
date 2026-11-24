@@ -175,7 +175,17 @@ def post_report(message_id, read, deleted):
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8") or "{}")
     except urllib.error.HTTPError as e:
-        return False, "HTTP %d" % e.code
+        # Include the server's own detail: the sync worker and
+        # mail-inject both answer 403 "bad token", so the detail is
+        # what tells them apart in the journal.
+        detail = ""
+        try:
+            err_data = json.loads(e.read().decode("utf-8") or "{}")
+            if isinstance(err_data, dict) and err_data.get("detail"):
+                detail = " (%s)" % err_data["detail"]
+        except Exception:
+            pass
+        return False, "HTTP %d%s" % (e.code, detail)
     except Exception as e:  # noqa: BLE001
         return False, "post failed: %s" % (e,)
     if not isinstance(data, dict) or data.get("status") in ("error",):
@@ -274,6 +284,34 @@ def poll_all():
     return all_ok
 
 
+def check_worker_url():
+    """Verify SYNC_WORKER_URL actually points at the sync worker.
+
+    GET / on the sync worker answers 200 with the 'cloud-mail
+    merge-back sync worker' banner. Anything else — a 404 from
+    mail-inject (wrong URL: the watcher would be reporting state to
+    the injection service, which answers the same 403 "bad token"
+    for the missing token/user fields), a tunnel error, a wrong
+    host — means the reports would go nowhere useful. Fail loudly
+    at startup instead of 403ing every minute. Returns (ok, detail).
+    """
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(SYNC_WORKER_URL + "/", timeout=15) as resp:
+                body = resp.read().decode("utf-8", "replace")
+                if resp.status == 200 and "cloud-mail merge-back sync worker" in body:
+                    return True, "ok"
+                return False, "unexpected answer HTTP %d: %s" % (resp.status, body[:120])
+        except urllib.error.HTTPError as e:
+            return False, "HTTP %d (this URL is not the sync worker — check SYNC_WORKER_URL)" % e.code
+        except Exception as e:  # noqa: BLE001 - transient network error; retry
+            if attempt < 4:
+                time.sleep(10)
+                continue
+            return False, "unreachable: %s" % (e,)
+    return False, "unreachable"
+
+
 def main():
     if not TOKEN:
         print("MAIL_INJECT_TOKEN is not set; refusing to start.", file=sys.stderr)
@@ -283,6 +321,11 @@ def main():
         sys.exit(1)
     if not SYNC_WORKER_URL:
         print("SYNC_WORKER_URL is not set; refusing to start.", file=sys.stderr)
+        sys.exit(1)
+    ok, detail = check_worker_url()
+    if not ok:
+        print("SYNC_WORKER_URL check failed (%s): %s; refusing to start."
+              % (SYNC_WORKER_URL, detail), file=sys.stderr)
         sys.exit(1)
     log("state-watch starting (users: %s, poll every %ds, state file: %s)"
         % (",".join(sorted(USERS)), POLL_SECONDS, STATE_FILE))
