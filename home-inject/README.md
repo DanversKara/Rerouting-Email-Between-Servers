@@ -9,17 +9,31 @@ existing Cloudflare Tunnel — never directly.
 
 - `GET /health` — 200 when an injection path is available, 503 otherwise.
   This is what the sync worker polls to decide whether home is back.
-- `POST /inject` with JSON `{"token", "user", "rawMime"}` — checks the
-  token (constant-time compare) and that `user` is on the allowlist, then
-  pipes the raw message to sendmail inside the plMail Postfix (mta)
-  container (`docker exec -i <MTA_CONTAINER> sendmail ...`), which
-  delivers it to Dovecot exactly like a message that arrived directly.
-  Every original header survives; the only header added is the usual
+- `POST /inject` with JSON `{"token", "user", "rawMime", "read",
+  "deleted"}` — checks the token (constant-time compare) and that
+  `user` is on the allowlist. Unread inbox mail is piped to sendmail
+  inside the plMail Postfix (mta) container
+  (`docker exec -i <MTA_CONTAINER> sendmail ...`), which delivers it
+  to Dovecot exactly like a message that arrived directly. Every
+  original header survives; the only header added is the usual
   `Received:` line Postfix adds to everything, and the envelope sender
   is set to the original `From:` address. The container path is used on
   purpose: the host's own sendmail binary accepts mail into a queue
   that is never processed (the host Postfix daemon is down), so the
   host binary is only a fallback when no container is configured.
+  Read mail is stored with `\Seen` and deleted mail in the Trash
+  folder instead, via `docker exec -i <MAILSTORE_CONTAINER> doveadm
+  save -u <user> -m <mailbox> [-F \Seen]` — sendmail cannot set
+  flags or choose a folder. If doveadm is unavailable for a
+  read/deleted case the inject **fails** (the sync worker retries)
+  rather than delivering to the wrong place.
+- `POST /state` with JSON `{"token", "user", "messageId", "read",
+  "deleted"}` — applies a backup-side read/delete state to the home
+  copy: `\Seen` on/off (via `doveadm flags`), or move the INBOX copy
+  to Trash (via `doveadm move`). A copy already in Trash stays there
+  — nothing is ever moved out of Trash — and a message found nowhere
+  is skipped (200 `skipped`), never resurrected or re-sent. Same token
+  and allowlist as `/inject`.
 - `GET /aliases` — every account's live aliases from plMail, keyed by the
   allowlist mailbox address, e.g.
   `{"support@bearermail.com": ["walmart@bearermail.com", ...]}`. Same
@@ -54,6 +68,13 @@ cp mail-inject.service /etc/systemd/system/
 #    Dovecot.
 docker ps --format '{{.Names}} {{.Image}}' | grep -i -E 'postfix|mta|mail'
 
+# 2b. Confirm the Trash folder name Dovecot uses (the default is
+#     "Trash"; if your folder is named differently, set
+#     MAIL_TRASH_FOLDER in the env file to match it):
+docker exec plmail-mail-server-mailstore-1 doveadm mailbox list -u you@bearermail.com
+#    Also confirm doveadm itself works from this host:
+docker exec -i plmail-mail-server-mailstore-1 doveadm search -u you@bearermail.com mailbox INBOX ALL | head
+
 # 3. Create the env file (use your real addresses, not the placeholders)
 cat > /opt/mail-inject/mail-inject.env <<'EOF'
 MAIL_INJECT_TOKEN=<paste the token from step 4>
@@ -66,6 +87,12 @@ MTA_CONTAINER=plmail-mail-server-mta-1
 # PLMAIL_DB_CONTAINER=plmail-mail-server-database-1
 # PLMAIL_DB_USER=app
 # PLMAIL_DB_NAME=app
+# Read/deleted injects and POST /state use the mailstore container
+# (defaults are usually right; set these only if yours differ):
+# MAILSTORE_CONTAINER=plmail-mail-server-mailstore-1
+# MAIL_TRASH_FOLDER=Trash
+# Home-to-backup watcher only — public URL of the sync worker:
+# SYNC_WORKER_URL=https://cloud-mail-sync.soarespaulv.workers.dev
 EOF
 chmod 600 /opt/mail-inject/mail-inject.env
 
@@ -80,6 +107,16 @@ systemctl enable --now mail-inject
 curl -s http://127.0.0.1:8765/health
 #    Expect: {"status": "ok"}
 journalctl -u mail-inject -f   # one line per request; Ctrl-C to exit
+
+# 6. Start the home-to-backup state watcher (optional but part of
+#    the two-way sync: without it, reads/deletes made at home never
+#    reach the backup). It reuses the same env file — just add
+#    SYNC_WORKER_URL to it first (see step 3).
+cp state-watch.py /opt/mail-inject/
+cp state-watch.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now state-watch
+journalctl -u state-watch -f   # one line per poll; Ctrl-C to exit
 ```
 
 ## Test the aliases endpoint
@@ -112,6 +149,21 @@ curl -s https://sync.bearermail.com/health
 Then set the same hostname in the sync worker's vars
 (`HOME_HEALTH_URL=https://sync.bearermail.com/health`,
 `HOME_INJECT_URL=https://sync.bearermail.com/inject`).
+
+## The state watcher (home → backup)
+
+`state-watch.py` polls Dovecot every 5 minutes (via `doveadm fetch`
+for `uid`, `flags` and `hdr.message-id` on INBOX + Trash) and reports
+only two transitions to the sync worker (`POST /state`, same token):
+a message gaining `\Seen`, and a message appearing in Trash. It
+never deletes or moves home mail, never asks the backup for mail, and
+never reports a message disappearing from Trash (expunge stays local
+— the backup Trash copy is the last copy) or a message losing
+`\Seen`. It keeps its seen-state in `/opt/mail-inject/
+state-watch.json` and only saves it after every report in a poll
+succeeds, so a failed report is retried next poll. First poll after
+install converges safely: mail already read or already in Trash is
+reported once (the backup treats an unchanged state as a no-op).
 
 ## Test an injection by hand
 
