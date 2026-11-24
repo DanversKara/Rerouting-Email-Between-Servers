@@ -22,7 +22,7 @@
 //   last_email_id    highest emailId fully processed (synced or deliberately
 //                    skipped); the next run starts just above it
 //   last_alias_sync  epoch ms of the last successful alias sync; the
-//                    alias sync runs when this is missing or over 3h old
+//                    alias sync runs when this is missing or over 30m old
 //   home_down_since  ISO timestamp of when home was last noticed down
 //                    (observability only — it never gates syncing)
 //   last_state_cursor  JSON {"updateTime","emailId"} — highest (update_time,
@@ -48,7 +48,7 @@ const KV_DOWN_SINCE = 'home_down_since';
 const KV_LAST_ID = 'last_email_id';
 const KV_STATE_CURSOR = 'last_state_cursor';
 const KV_ALIAS_SYNC = 'last_alias_sync';
-const ALIAS_SYNC_INTERVAL_MS = 3 * 60 * 60 * 1000; // 3 hours
+const ALIAS_SYNC_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const KV_TOKEN = 'cloudmail_token';
 const SYNCED_TTL_SECONDS = 60 * 60 * 24 * 30; // 30 days
 const MAX_PER_RUN = 200; // messages moved per cron run; the rest wait for the next run
@@ -298,7 +298,7 @@ function aliasesUrl(env) {
 	return injectUrl.slice(0, -'/inject'.length) + '/aliases';
 }
 
-// Sync home aliases into Cloud Mail, at most once every 3 hours.
+// Sync home aliases into Cloud Mail, at most once every 30 minutes.
 // Add-only: addresses are added to their owning user when missing and
 // never removed. A failed fetch or a failed add never clears anything:
 // the timestamp only advances when nothing failed, so the next run
@@ -308,7 +308,7 @@ async function maybeSyncAliases(env, userMap) {
 	const lastRaw = await env.SYNC_KV.get(KV_ALIAS_SYNC);
 	const last = Number(lastRaw || '0') || 0;
 	if (last && Date.now() - last < ALIAS_SYNC_INTERVAL_MS) {
-		return { status: 'skipped', reason: 'synced within the last 3h' };
+		return { status: 'skipped', reason: 'synced within the last 30m' };
 	}
 
 	const url = aliasesUrl(env);
