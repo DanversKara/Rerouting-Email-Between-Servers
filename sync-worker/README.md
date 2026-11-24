@@ -19,6 +19,11 @@ run. Server-down and internet-down look identical from out here, and both
 are handled: while home is down nothing advances and the outage start
 time is recorded in KV for observability only.
 
+Read/unread and Trash state travel with the mail: each list row already
+carries `unread` and `isDel`, so the inject POST includes
+`read`/`deleted` and home stores read mail with `\Seen` and deleted
+mail in the Trash folder. See "State sync" below.
+
 Messages skipped on purpose (logged, not errors):
 
 - `userId 0` — mail for an unknown recipient that the worker could not
@@ -27,6 +32,36 @@ Messages skipped on purpose (logged, not errors):
 - No `USER_MAP` entry for the message's Cloud Mail user id.
 - No stored original (message arrived before the raw-mail patch was
   deployed). The Cloud Mail copy is kept.
+
+## State sync (two-way read/delete)
+
+The backup and home inboxes keep the same read/unread and Trash state,
+in three parts. **Content still flows one way only, once, via the
+`last_email_id` cursor** — state updates never carry message content
+and never move mail out of Trash, so a delete at home can never make
+the backup re-send anything.
+
+- **At sync time.** The inject POST carries `read`/`deleted` (see
+  above); home stores the message accordingly.
+- **Backup → home, after sync.** A second pass each run lists rows
+  whose `update_time` moved after the `last_state_cursor`
+  (`(update_time, email_id)` tuple, so rows sharing one second are
+  never skipped) via the admin `GET /api/email/stateList` endpoint,
+  and POSTs each row's current state to home `POST /state`. A message
+  not home yet is skipped (200 skipped) — the content pass carries
+  the state when it delivers. At most 100 state updates per run.
+  The run summary carries a `stateSync` field
+  (`{status, listed, pushed, skipped, failed}`).
+- **Home → backup.** The docker-host watcher (`../home-inject/
+  state-watch.py`) polls Dovecot and POSTs only read-gained and
+  moved-to-Trash transitions to this worker's `POST /state`
+  (authenticated with `SYNC_TOKEN`, constant-time compare). The
+  worker forwards them to the backup's admin-only
+  `POST /api/email/state` with the cached admin JWT.
+
+Limits, by design: restoring a mail from Trash does not mirror to
+the other side, and permanently emptying home Trash leaves the
+backup Trash copy as the last copy.
 
 ## Alias sync
 
