@@ -56,8 +56,17 @@ docker is unavailable.
 Standard library only: no third-party packages, no pip install.
 
 Configuration (environment, see mail-inject.env):
-  MAIL_INJECT_TOKEN  required. Shared secret; must match the sync worker's
-                     SYNC_TOKEN secret. Checked with a constant-time compare.
+  MAIL_INJECT_TOKEN  required unless OPENBAO_TOKEN is set. Shared secret;
+                     must match the sync worker's SYNC_TOKEN secret.
+                     Checked with a constant-time compare.
+  OPENBAO_TOKEN      optional. Limited OpenBao token (the badge) that may
+                     only read secret/mail-inject/sync-token. When set, the
+                     real sync token is fetched from the vault at startup
+                     and kept only in memory; MAIL_INJECT_TOKEN is then
+                     ignored. When unset, MAIL_INJECT_TOKEN is used as
+                     before, so the old .env still works as a rollback.
+  OPENBAO_ADDR       OpenBao address, default http://192.168.8.100:8200.
+                     Only used when OPENBAO_TOKEN is set.
   MAIL_INJECT_USERS  required. Comma-separated allowlist of home inbox
                      addresses, e.g. you@bearermail.com,friend@bearermail.com
                      Only these users ever receive injected mail.
@@ -97,6 +106,8 @@ import shutil
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from email.parser import BytesParser
 from email.policy import default as default_policy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -114,7 +125,49 @@ PLMAIL_DB_CONTAINER = os.environ.get("PLMAIL_DB_CONTAINER", "plmail-mail-server-
 PLMAIL_DB_USER = os.environ.get("PLMAIL_DB_USER", "app")
 PLMAIL_DB_NAME = os.environ.get("PLMAIL_DB_NAME", "app")
 
-TOKEN = os.environ.get("MAIL_INJECT_TOKEN", "")
+# The sync token is resolved in main() (load_token): from the vault when
+# OPENBAO_TOKEN is set, else from MAIL_INJECT_TOKEN. Kept only in memory.
+TOKEN = ""
+OPENBAO_ADDR = os.environ.get("OPENBAO_ADDR", "http://192.168.8.100:8200").strip().rstrip("/")
+OPENBAO_TOKEN = os.environ.get("OPENBAO_TOKEN", "").strip()
+OPENBAO_SECRET_PATH = "mail-inject/sync-token"
+
+
+def fetch_token_from_openbao(addr, bao_token):
+    """Read the sync token from OpenBao KV v2. Returns the token string.
+
+    Raises RuntimeError with a plain message on any failure (sealed vault,
+    bad badge, unreachable, missing key). Never logs the token.
+    """
+    url = addr + "/v1/secret/data/" + OPENBAO_SECRET_PATH
+    req = urllib.request.Request(url, headers={"X-Vault-Token": bao_token})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(
+            "OpenBao HTTP %s (vault may be sealed or the badge token invalid)" % e.code)
+    except Exception as e:  # noqa: BLE001 - report anything, never crash startup
+        raise RuntimeError("OpenBao unreachable: %s" % e)
+    token = (data.get("data") or {}).get("data", {}).get("token", "")
+    if not token:
+        raise RuntimeError("OpenBao secret %s has no 'token' key" % OPENBAO_SECRET_PATH)
+    return token
+
+
+def load_token():
+    """Resolve the sync token.
+
+    When OPENBAO_TOKEN (the limited badge) is set, the real token is
+    fetched from the vault at startup and kept only in memory. Otherwise
+    fall back to MAIL_INJECT_TOKEN (the pre-vault behaviour), so the old
+    .env still works as a rollback.
+    """
+    if OPENBAO_TOKEN:
+        return fetch_token_from_openbao(OPENBAO_ADDR, OPENBAO_TOKEN)
+    return os.environ.get("MAIL_INJECT_TOKEN", "").strip()
+
+
 USERS = {
     u.strip().lower()
     for u in os.environ.get("MAIL_INJECT_USERS", "").split(",")
@@ -613,8 +666,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global TOKEN
+    try:
+        TOKEN = load_token()
+    except RuntimeError as e:
+        print("could not load sync token: %s" % e, file=sys.stderr)
+        sys.exit(1)
     if not TOKEN:
-        print("MAIL_INJECT_TOKEN is not set; refusing to start.", file=sys.stderr)
+        print("no sync token configured (MAIL_INJECT_TOKEN or OPENBAO_TOKEN); refusing to start.", file=sys.stderr)
         sys.exit(1)
     if not USERS:
         print("MAIL_INJECT_USERS is empty; refusing to start.", file=sys.stderr)
